@@ -18,12 +18,12 @@ impl FromStr for SliceRange {
         Ok(Self {
             start: ptn
                 .first()
-                .unwrap()
+                .ok_or_else(|| String::from("range start must be needed"))?
                 .parse()
                 .map_err(|e: ParseIntError| e.to_string())?,
             end: ptn
                 .get(1)
-                .unwrap()
+                .ok_or_else(|| String::from("range end must be needed"))?
                 .parse()
                 .map_err(|e: ParseIntError| e.to_string())?,
             step: match ptn.get(2) {
