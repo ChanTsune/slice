@@ -1,22 +1,23 @@
-use std::io;
-use std::num::ParseIntError;
-use std::str::FromStr;
+use std::{
+    num::{NonZeroUsize, ParseIntError},
+    str::FromStr,
+};
 
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub(crate) struct SliceRange {
     pub(crate) start: usize,
     pub(crate) end: usize,
-    pub(crate) step: usize,
+    pub(crate) step: Option<NonZeroUsize>,
 }
 
 impl FromStr for SliceRange {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let ptn = s.split(":").collect::<Vec<_>>();
+        let ptn = s.split(':').collect::<Vec<_>>();
         Ok(Self {
             start: ptn
-                .get(0)
+                .first()
                 .unwrap()
                 .parse()
                 .map_err(|e: ParseIntError| e.to_string())?,
@@ -25,11 +26,10 @@ impl FromStr for SliceRange {
                 .unwrap()
                 .parse()
                 .map_err(|e: ParseIntError| e.to_string())?,
-            step: ptn
-                .get(2)
-                .unwrap()
-                .parse()
-                .map_err(|e: ParseIntError| e.to_string())?,
+            step: match ptn.get(2) {
+                Some(step) => Some(step.parse().map_err(|e: ParseIntError| e.to_string())?),
+                None => None,
+            },
         })
     }
 }

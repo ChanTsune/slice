@@ -1,8 +1,10 @@
 use crate::range::SliceRange;
 use clap::Parser;
-use std::io::{stdin, stdout, BufRead, Read, Seek, Write};
-use std::path::PathBuf;
-use std::{fs, io};
+use std::{
+    fs,
+    io::{self, stdin, stdout, BufRead, Read, Write},
+    path::PathBuf,
+};
 
 mod cli;
 mod range;
@@ -13,14 +15,14 @@ fn single_file<R: Read>(input: R, range: &SliceRange) -> io::Result<()> {
         .lines()
         .enumerate()
         .skip(range.start)
-        .step_by(range.step)
+        .step_by(range.step.map(|step| step.get()).unwrap_or(1))
     {
         if range.end <= idx {
             break;
         }
         let line = line?;
         out.write_all(line.as_bytes())?;
-        out.write(b"\n")?;
+        out.write_all(b"\n")?;
     }
     Ok(())
 }
