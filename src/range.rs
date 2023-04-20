@@ -36,7 +36,7 @@ impl FromStr for SliceRange {
                 usize::MAX,
             )?,
             step: match ptn.get(2) {
-                Some(step) => Some(step.parse().map_err(|e: ParseIntError| e.to_string())?),
+                Some(step) => Some(parse_or(step, unsafe { NonZeroUsize::new_unchecked(1) })?),
                 None => None,
             },
         })
@@ -71,6 +71,15 @@ mod tests {
                 step: None,
             }
         );
+        let slice = SliceRange::from_str("0:1:").expect("parse failed.");
+        assert_eq!(
+            slice,
+            SliceRange {
+                start: 0,
+                end: 1,
+                step: NonZeroUsize::new(1),
+            }
+        );
     }
 
     #[test]
@@ -89,6 +98,32 @@ mod tests {
     #[test]
     fn without_end() {
         let slice = SliceRange::from_str("0::1").expect("parse failed.");
+        assert_eq!(
+            slice,
+            SliceRange {
+                start: 0,
+                end: usize::MAX,
+                step: NonZeroUsize::new(1),
+            }
+        );
+    }
+
+    #[test]
+    fn without_start_and_end() {
+        let slice = SliceRange::from_str("::1").expect("parse failed.");
+        assert_eq!(
+            slice,
+            SliceRange {
+                start: 0,
+                end: usize::MAX,
+                step: NonZeroUsize::new(1),
+            }
+        );
+    }
+
+    #[test]
+    fn without_all() {
+        let slice = SliceRange::from_str("::").expect("parse failed.");
         assert_eq!(
             slice,
             SliceRange {
