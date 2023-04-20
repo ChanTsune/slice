@@ -4,6 +4,7 @@ version = "0.0.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 description = "slice is a command-line tool that allows you to slice the contents of a file using syntax similar to Python's slice notation."
+readme = "README.md"
 repository = "https://github.com/ChanTsune/slice.git"
 categories = ["text-processing", "command-line-utilities"]
 keywords = ["text", "utility", "tool"]
