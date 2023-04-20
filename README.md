@@ -2,6 +2,12 @@
 
 Slice is a command-line tool written in Rust that allows you to slice the contents of a file using syntax similar to Python's slice notation.
 
+![test_workflow](https://github.com/ChanTsune/slice/actions/workflows/test.yml/badge.svg)
+[![Crates.io][crates-badge]][crates-url]
+
+[crates-badge]: https://img.shields.io/crates/v/slice-command.svg
+[crates-url]: https://crates.io/crates/slice-command
+
 ## Installation
 
 ### Via Cargo
@@ -57,4 +63,4 @@ slice --help
 
 ## License
 
-Slice is licensed under the MIT License. See [LICENSE](LICENSE) for more information.
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
