@@ -14,14 +14,14 @@ impl FromStr for SliceRange {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        fn parse_or(s: &str, empty: usize) -> Result<usize, String> {
-            let result: Result<usize, ParseIntError> = s.parse();
+        fn parse_or<T: FromStr<Err = ParseIntError>>(s: &str, empty: T) -> Result<T, String> {
+            let result: Result<T, ParseIntError> = s.parse();
             match result {
                 Ok(v) => Ok(v),
                 Err(err) if *err.kind() == IntErrorKind::Empty => Ok(empty),
                 Err(err) => Err(err),
             }
-            .map_err(|e: ParseIntError| e.to_string())
+            .map_err(|e| e.to_string())
         }
         let ptn = s.split(':').collect::<Vec<_>>();
         Ok(Self {
