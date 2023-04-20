@@ -293,8 +293,8 @@ mod tests {
     }
 
     mod character {
-        use std::num::NonZeroUsize;
         use super::*;
+        use std::num::NonZeroUsize;
 
         #[test]
         fn empty() {
@@ -347,7 +347,7 @@ mod tests {
                     step: None,
                 },
             )
-                .expect("");
+            .expect("");
 
             assert_eq!(
                 out,
@@ -368,12 +368,9 @@ mod tests {
                     step: None,
                 },
             )
-                .expect("");
+            .expect("");
 
-            assert_eq!(
-                out,
-                b"slice command i"
-            );
+            assert_eq!(out, b"slice command i");
         }
 
         #[test]
@@ -389,12 +386,9 @@ mod tests {
                     step: None,
                 },
             )
-                .expect("");
+            .expect("");
 
-            assert_eq!(
-                out,
-                b" command i"
-            );
+            assert_eq!(out, b" command i");
         }
 
         #[test]
@@ -410,13 +404,9 @@ mod tests {
                     step: NonZeroUsize::new(2),
                 },
             )
-                .expect("");
+            .expect("");
 
-            assert_eq!(
-                out,
-                b"siecmadi ipesrn lcn omn.Lk  yhnsiesna."
-            );
+            assert_eq!(out, b"siecmadi ipesrn lcn omn.Lk  yhnsiesna.");
         }
-
     }
 }

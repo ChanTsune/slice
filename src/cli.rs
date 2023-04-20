@@ -20,3 +20,39 @@ pub(crate) struct Cli {
     #[arg(help = "Target files. if not provided use stdin")]
     pub(crate) files: Vec<PathBuf>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::num::NonZeroUsize;
+
+    #[test]
+    fn line_mode_args() {
+        let args = Cli::parse_from(["slice", "-l", "0::1", "text.txt"]);
+        assert!(args.lines);
+        assert_eq!(
+            args.range,
+            SliceRange {
+                start: 0,
+                end: usize::MAX,
+                step: NonZeroUsize::new(1),
+            }
+        );
+        assert_eq!(args.files, vec![PathBuf::from("text.txt")]);
+    }
+
+    #[test]
+    fn character_mode_args() {
+        let args = Cli::parse_from(["slice", "-c", "0::1", "text.txt"]);
+        assert!(args.characters);
+        assert_eq!(
+            args.range,
+            SliceRange {
+                start: 0,
+                end: usize::MAX,
+                step: NonZeroUsize::new(1),
+            }
+        );
+        assert_eq!(args.files, vec![PathBuf::from("text.txt")]);
+    }
+}
