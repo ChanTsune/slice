@@ -9,8 +9,8 @@ use std::{
 mod cli;
 mod range;
 
-fn single_file<R: Read>(input: R, range: &SliceRange) -> io::Result<()> {
-    let mut out = io::BufWriter::new(stdout());
+fn line_mode<R: Read, W: Write>(input: R, output: W, range: &SliceRange) -> io::Result<()> {
+    let mut out = io::BufWriter::new(output);
     for (idx, line) in io::BufReader::new(input)
         .lines()
         .enumerate()
@@ -27,23 +27,108 @@ fn single_file<R: Read>(input: R, range: &SliceRange) -> io::Result<()> {
     Ok(())
 }
 
-fn multi(targets: Vec<PathBuf>, range: &SliceRange) -> io::Result<()> {
+fn character_mode<R: Read, W: Write>(input: R, output: W, range: &SliceRange) -> io::Result<()> {
+    let mut out = io::BufWriter::new(output);
+    for (idx, byte) in io::BufReader::new(input)
+        .bytes()
+        .enumerate()
+        .skip(range.start)
+        .step_by(range.step.map(|step| step.get()).unwrap_or(1))
+    {
+        if range.end <= idx {
+            break;
+        }
+        out.write_all(&[byte?])?;
+    }
+    Ok(())
+}
+
+fn multi<W: Write, F: Fn(fs::File, &W, &SliceRange) -> io::Result<()>>(
+    targets: Vec<PathBuf>,
+    mut out: W,
+    range: &SliceRange,
+    f: F,
+) -> io::Result<()> {
     for target in targets {
-        single_file(fs::File::open(target)?, range)?;
+        writeln!(out, "==> {} <==", target.display())?;
+        f(fs::File::open(target)?, &out, range)?;
     }
     Ok(())
 }
 
 fn entry(args: cli::Cli) -> io::Result<()> {
     if args.files.is_empty() {
-        single_file(stdin(), &args.range)
+        if args.characters {
+            character_mode(stdin(), stdout(), &args.range)
+        } else {
+            line_mode(stdin(), stdout(), &args.range)
+        }
     } else if args.files.len() == 1 {
-        single_file(fs::File::open(args.files.first().expect(""))?, &args.range)
+        if args.characters {
+            character_mode(
+                fs::File::open(args.files.first().expect(""))?,
+                stdout(),
+                &args.range,
+            )
+        } else {
+            line_mode(
+                fs::File::open(args.files.first().expect(""))?,
+                stdout(),
+                &args.range,
+            )
+        }
     } else {
-        multi(args.files, &args.range)
+        if args.characters {
+            multi(args.files, stdout(), &args.range, |input, output, range| {
+                character_mode(input, output, range)
+            })
+        } else {
+            multi(args.files, stdout(), &args.range, |input, output, range| {
+                line_mode(input, output, range)
+            })
+        }
     }
 }
 
 fn main() -> io::Result<()> {
     entry(cli::Cli::parse())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn line_empty() {
+        let mut out = Vec::new();
+        line_mode(
+            "".as_bytes(),
+            out.as_mut_slice(),
+            &SliceRange {
+                start: 0,
+                end: 0,
+                step: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(std::str::from_utf8(&out).expect(""), "")
+    }
+
+    #[test]
+    fn character_empty() {
+        let mut out = Vec::new();
+        character_mode(
+            "".as_bytes(),
+            out.as_mut_slice(),
+            &SliceRange {
+                start: 0,
+                end: 0,
+                step: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(std::str::from_utf8(&out).expect(""), "")
+    }
 }
