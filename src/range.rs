@@ -42,3 +42,82 @@ impl FromStr for SliceRange {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn basic() {
+        let slice = SliceRange::from_str("0:1:1").expect("parse failed.");
+        assert_eq!(
+            slice,
+            SliceRange {
+                start: 0,
+                end: 1,
+                step: NonZeroUsize::new(1),
+            }
+        );
+    }
+
+    #[test]
+    fn without_step() {
+        let slice = SliceRange::from_str("0:1").expect("parse failed.");
+        assert_eq!(
+            slice,
+            SliceRange {
+                start: 0,
+                end: 1,
+                step: None,
+            }
+        );
+    }
+
+    #[test]
+    fn without_start() {
+        let slice = SliceRange::from_str(":1:1").expect("parse failed.");
+        assert_eq!(
+            slice,
+            SliceRange {
+                start: 0,
+                end: 1,
+                step: NonZeroUsize::new(1),
+            }
+        );
+    }
+
+    #[test]
+    fn without_end() {
+        let slice = SliceRange::from_str("0::1").expect("parse failed.");
+        assert_eq!(
+            slice,
+            SliceRange {
+                start: 0,
+                end: usize::MAX,
+                step: NonZeroUsize::new(1),
+            }
+        );
+    }
+
+    mod invalid {
+        use super::*;
+
+        #[test]
+        #[should_panic]
+        fn non_integer_start() {
+            SliceRange::from_str("a:1:1").expect("");
+        }
+
+        #[test]
+        #[should_panic]
+        fn non_integer_end() {
+            SliceRange::from_str("1:a:1").expect("");
+        }
+
+        #[test]
+        #[should_panic]
+        fn non_integer_step() {
+            SliceRange::from_str("1:1:b").expect("");
+        }
+    }
+}
