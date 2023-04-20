@@ -11,11 +11,14 @@ use std::path::PathBuf;
     arg_required_else_help = true,
 )]
 pub(crate) struct Cli {
-    #[arg(help = "Slice pattern eg. '1:100'")]
+    #[arg(
+        help = "The slice syntax is similar to Python's slice syntax, with the format `start:end:step`. Each value is optional and, if omitted, defaults to the beginning of the file, the end of the file, and a step of 1, respectively.
+ eg. '1:100:1'"
+    )]
     pub(crate) range: SliceRange,
-    #[arg(short, help = "Line mode")]
+    #[arg(short, help = "Slice the lines (default)")]
     pub(crate) lines: bool,
-    #[arg(short, help = "Character mode")]
+    #[arg(short, help = "Slice the characters.")]
     pub(crate) characters: bool,
     #[arg(help = "Target files. if not provided use stdin")]
     pub(crate) files: Vec<PathBuf>,
