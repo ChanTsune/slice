@@ -4,8 +4,13 @@ Slice is a command-line tool written in Rust that allows you to slice the conten
 
 ## Installation
 
-To install `slice`, clone the GitHub repository and build it from source using the Rust package manager, Cargo.
+### Via Cargo
 
+```sh
+cargo install slice-command
+```
+
+### From Source (via Cargo)
 ```sh
 git clone https://github.com/ChanTsune/slice-command.git
 cd slice-command
