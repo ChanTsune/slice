@@ -98,37 +98,325 @@ fn main() -> io::Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn line_empty() {
-        let mut out = Vec::new();
-        line_mode(
-            "".as_bytes(),
-            out.as_mut_slice(),
-            &SliceRange {
-                start: 0,
-                end: 0,
-                step: None,
-            },
-        )
-        .unwrap();
+    mod line {
+        use super::*;
 
-        assert_eq!(std::str::from_utf8(&out).expect(""), "")
+        #[test]
+        fn empty() {
+            let mut out = Vec::new();
+            line_mode(
+                b"".as_slice(),
+                &mut out,
+                &SliceRange {
+                    start: 0,
+                    end: usize::MAX,
+                    step: None,
+                },
+            )
+            .expect("");
+
+            assert_eq!(out, b"");
+        }
+
+        mod one_line {
+            use super::*;
+            use std::num::NonZeroUsize;
+
+            #[test]
+            fn no_slice() {
+                let mut out = Vec::new();
+                line_mode(
+                    b"slice command is simple string slicing command.\n".as_slice(),
+                    &mut out,
+                    &SliceRange {
+                        start: 0,
+                        end: usize::MAX,
+                        step: None,
+                    },
+                )
+                .expect("");
+
+                assert_eq!(out, b"slice command is simple string slicing command.\n");
+            }
+
+            #[test]
+            fn skip_first() {
+                let mut out = Vec::new();
+                line_mode(
+                    b"slice command is simple string slicing command.\n".as_slice(),
+                    &mut out,
+                    &SliceRange {
+                        start: 1,
+                        end: usize::MAX,
+                        step: None,
+                    },
+                )
+                .expect("");
+
+                assert_eq!(out, b"");
+            }
+
+            #[test]
+            fn skip_over_input() {
+                let mut out = Vec::new();
+                line_mode(
+                    b"slice command is simple string slicing command.\n".as_slice(),
+                    &mut out,
+                    &SliceRange {
+                        start: 2,
+                        end: usize::MAX,
+                        step: None,
+                    },
+                )
+                .expect("");
+
+                assert_eq!(out, b"");
+            }
+
+            #[test]
+            fn drop_tail() {
+                let mut out = Vec::new();
+                line_mode(
+                    b"slice command is simple string slicing command.\n".as_slice(),
+                    &mut out,
+                    &SliceRange {
+                        start: 0,
+                        end: 0,
+                        step: None,
+                    },
+                )
+                .expect("");
+
+                assert_eq!(out, b"");
+            }
+
+            #[test]
+            fn step_two_slice() {
+                let mut out = Vec::new();
+                line_mode(
+                    b"slice command is simple string slicing command.\n".as_slice(),
+                    &mut out,
+                    &SliceRange {
+                        start: 0,
+                        end: usize::MAX,
+                        step: NonZeroUsize::new(2),
+                    },
+                )
+                .expect("");
+
+                assert_eq!(out, b"slice command is simple string slicing command.\n");
+            }
+        }
+
+        mod multi_line {
+            use super::*;
+            use std::num::NonZeroUsize;
+
+            #[test]
+            fn no_slice() {
+                let mut out = Vec::new();
+                line_mode(
+                    b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
+                        .as_slice(),
+                    &mut out,
+                    &SliceRange {
+                        start: 0,
+                        end: usize::MAX,
+                        step: None,
+                    },
+                )
+                    .expect("");
+
+                assert_eq!(
+                    out,
+                    b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
+                );
+            }
+
+            #[test]
+            fn skip_first() {
+                let mut out = Vec::new();
+                line_mode(
+                    b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
+                        .as_slice(),
+                    &mut out,
+                    &SliceRange {
+                        start: 1,
+                        end: usize::MAX,
+                        step: None,
+                    },
+                )
+                    .expect("");
+
+                assert_eq!(out, b"Like a python slice syntax.\n");
+            }
+
+            #[test]
+            fn drop_last() {
+                let mut out = Vec::new();
+                line_mode(
+                    b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
+                        .as_slice(),
+                    &mut out,
+                    &SliceRange {
+                        start: 0,
+                        end: 1,
+                        step: None,
+                    },
+                )
+                    .expect("");
+
+                assert_eq!(out, b"slice command is simple string slicing command.\n");
+            }
+
+            #[test]
+            fn step_two_slice() {
+                let mut out = Vec::new();
+                line_mode(
+                    b"slice command is simple string slicing command.\nLike a python slice syntax.\n".repeat(5)
+                        .as_slice(),
+                    &mut out,
+                    &SliceRange {
+                        start: 0,
+                        end: usize::MAX,
+                        step: NonZeroUsize::new(2),
+                    },
+                )
+                    .expect("");
+
+                assert_eq!(
+                    out,
+                    b"slice command is simple string slicing command.\n".repeat(5)
+                );
+            }
+        }
     }
 
-    #[test]
-    fn character_empty() {
-        let mut out = Vec::new();
-        character_mode(
-            "".as_bytes(),
-            out.as_mut_slice(),
-            &SliceRange {
-                start: 0,
-                end: 0,
-                step: None,
-            },
-        )
-        .unwrap();
+    mod character {
+        use std::num::NonZeroUsize;
+        use super::*;
 
-        assert_eq!(std::str::from_utf8(&out).expect(""), "")
+        #[test]
+        fn empty() {
+            let mut out = Vec::new();
+            character_mode(
+                b"".as_slice(),
+                &mut out,
+                &SliceRange {
+                    start: 0,
+                    end: usize::MAX,
+                    step: None,
+                },
+            )
+            .expect("");
+
+            assert_eq!(out, b"");
+        }
+
+        #[test]
+        fn no_slice() {
+            let mut out = Vec::new();
+            character_mode(
+                b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
+                    .as_slice(),
+                &mut out,
+                &SliceRange {
+                    start: 0,
+                    end: usize::MAX,
+                    step: None,
+                },
+            )
+            .expect("");
+
+            assert_eq!(
+                out,
+                b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
+            );
+        }
+
+        #[test]
+        fn skip_first() {
+            let mut out = Vec::new();
+            character_mode(
+                b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
+                    .as_slice(),
+                &mut out,
+                &SliceRange {
+                    start: 10,
+                    end: usize::MAX,
+                    step: None,
+                },
+            )
+                .expect("");
+
+            assert_eq!(
+                out,
+                b"and is simple string slicing command.\nLike a python slice syntax.\n"
+            );
+        }
+
+        #[test]
+        fn drop_last() {
+            let mut out = Vec::new();
+            character_mode(
+                b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
+                    .as_slice(),
+                &mut out,
+                &SliceRange {
+                    start: 0,
+                    end: 15,
+                    step: None,
+                },
+            )
+                .expect("");
+
+            assert_eq!(
+                out,
+                b"slice command i"
+            );
+        }
+
+        #[test]
+        fn skip_first_and_drop_last() {
+            let mut out = Vec::new();
+            character_mode(
+                b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
+                    .as_slice(),
+                &mut out,
+                &SliceRange {
+                    start: 5,
+                    end: 15,
+                    step: None,
+                },
+            )
+                .expect("");
+
+            assert_eq!(
+                out,
+                b" command i"
+            );
+        }
+
+        #[test]
+        fn skip_two_slice() {
+            let mut out = Vec::new();
+            character_mode(
+                b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
+                    .as_slice(),
+                &mut out,
+                &SliceRange {
+                    start: 0,
+                    end: usize::MAX,
+                    step: NonZeroUsize::new(2),
+                },
+            )
+                .expect("");
+
+            assert_eq!(
+                out,
+                b"siecmadi ipesrn lcn omn.Lk  yhnsiesna."
+            );
+        }
+
     }
 }

@@ -104,6 +104,12 @@ mod tests {
 
         #[test]
         #[should_panic]
+        fn empty() {
+            SliceRange::from_str("").expect("");
+        }
+
+        #[test]
+        #[should_panic]
         fn non_integer_start() {
             SliceRange::from_str("a:1:1").expect("");
         }
