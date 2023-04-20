@@ -123,6 +123,15 @@ mod tests {
 
     #[test]
     fn without_all() {
+        let slice = SliceRange::from_str(":").expect("parse failed.");
+        assert_eq!(
+            slice,
+            SliceRange {
+                start: 0,
+                end: usize::MAX,
+                step: None,
+            }
+        );
         let slice = SliceRange::from_str("::").expect("parse failed.");
         assert_eq!(
             slice,
