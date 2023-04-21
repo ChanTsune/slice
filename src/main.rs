@@ -11,15 +11,12 @@ mod range;
 
 fn line_mode<R: Read, W: Write>(input: R, output: W, range: &SliceRange) -> io::Result<()> {
     let mut out = io::BufWriter::new(output);
-    for (idx, line) in io::BufReader::new(input)
+    for line in io::BufReader::new(input)
         .lines()
-        .enumerate()
+        .take(range.end)
         .skip(range.start)
         .step_by(range.step.map(|step| step.get()).unwrap_or(1))
     {
-        if range.end <= idx {
-            break;
-        }
         let line = line?;
         out.write_all(line.as_bytes())?;
         out.write_all(b"\n")?;
@@ -29,15 +26,12 @@ fn line_mode<R: Read, W: Write>(input: R, output: W, range: &SliceRange) -> io::
 
 fn character_mode<R: Read, W: Write>(input: R, output: W, range: &SliceRange) -> io::Result<()> {
     let mut out = io::BufWriter::new(output);
-    for (idx, byte) in io::BufReader::new(input)
+    for byte in io::BufReader::new(input)
         .bytes()
-        .enumerate()
+        .take(range.end)
         .skip(range.start)
         .step_by(range.step.map(|step| step.get()).unwrap_or(1))
     {
-        if range.end <= idx {
-            break;
-        }
         out.write_all(&[byte?])?;
     }
     Ok(())
