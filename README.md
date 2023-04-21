@@ -18,8 +18,8 @@ cargo install slice-command
 
 ### From Source (via Cargo)
 ```sh
-git clone https://github.com/ChanTsune/slice-command.git
-cd slice-command
+git clone https://github.com/ChanTsune/slice.git
+cd slice
 cargo install --path .
 ```
 
