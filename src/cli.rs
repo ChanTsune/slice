@@ -18,8 +18,13 @@ pub(crate) struct Cli {
     pub(crate) range: SliceRange,
     #[arg(short, help = "Slice the lines (default)")]
     pub(crate) lines: bool,
-    #[arg(short, help = "Slice the characters.")]
+    #[arg(short, help = "Slice the characters")]
     pub(crate) characters: bool,
+    #[arg(
+        short,
+        help = "Suppresses printing of headers when multiple files are being examined"
+    )]
+    pub(crate) quiet_headers: bool,
     #[arg(help = "Target files. if not provided use stdin")]
     pub(crate) files: Vec<PathBuf>,
 }

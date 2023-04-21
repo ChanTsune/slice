@@ -47,10 +47,13 @@ fn multi<W: Write, F: Fn(fs::File, &W, &SliceRange) -> io::Result<()>>(
     targets: Vec<PathBuf>,
     mut out: W,
     range: &SliceRange,
+    print_header: bool,
     f: F,
 ) -> io::Result<()> {
     for target in targets {
-        writeln!(out, "==> {} <==", target.display())?;
+        if print_header {
+            writeln!(out, "==> {} <==", target.display())?;
+        }
         f(fs::File::open(target)?, &out, range)?;
     }
     Ok(())
@@ -79,13 +82,21 @@ fn entry(args: cli::Cli) -> io::Result<()> {
         }
     } else {
         if args.characters {
-            multi(args.files, stdout(), &args.range, |input, output, range| {
-                character_mode(input, output, range)
-            })
+            multi(
+                args.files,
+                stdout(),
+                &args.range,
+                !args.quiet_headers,
+                |input, output, range| character_mode(input, output, range),
+            )
         } else {
-            multi(args.files, stdout(), &args.range, |input, output, range| {
-                line_mode(input, output, range)
-            })
+            multi(
+                args.files,
+                stdout(),
+                &args.range,
+                !args.quiet_headers,
+                |input, output, range| line_mode(input, output, range),
+            )
         }
     }
 }
