@@ -10,7 +10,7 @@ use std::path::PathBuf;
     author,
     arg_required_else_help = true,
 )]
-pub(crate) struct Cli {
+pub(crate) struct Args {
     #[arg(
         help = "The slice syntax is similar to Python's slice syntax, with the format `start:end:step`. Each value is optional and, if omitted, defaults to the beginning of the file, the end of the file, and a step of 1, respectively.
  eg. '1:100:1'"
@@ -36,7 +36,7 @@ mod tests {
 
     #[test]
     fn line_mode_args() {
-        let args = Cli::parse_from(["slice", "-l", "0::1", "text.txt"]);
+        let args = Args::parse_from(["slice", "-l", "0::1", "text.txt"]);
         assert!(args.lines);
         assert_eq!(
             args.range,
@@ -51,7 +51,7 @@ mod tests {
 
     #[test]
     fn character_mode_args() {
-        let args = Cli::parse_from(["slice", "-c", "0::1", "text.txt"]);
+        let args = Args::parse_from(["slice", "-c", "0::1", "text.txt"]);
         assert!(args.characters);
         assert_eq!(
             args.range,
