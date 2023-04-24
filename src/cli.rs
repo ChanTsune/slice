@@ -1,5 +1,5 @@
 use crate::range::SliceRange;
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use std::path::PathBuf;
 
 #[derive(Parser, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
@@ -9,6 +9,7 @@ use std::path::PathBuf;
     about,
     author,
     arg_required_else_help = true,
+    group(ArgGroup::new("mode").args(["lines", "characters"])),
 )]
 pub(crate) struct Cli {
     #[arg(
