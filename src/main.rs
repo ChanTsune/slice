@@ -53,7 +53,7 @@ fn multi<W: Write, F: Fn(fs::File, &W, &SliceRange) -> io::Result<()>>(
     Ok(())
 }
 
-fn entry(args: cli::Cli) -> io::Result<()> {
+fn entry(args: cli::Args) -> io::Result<()> {
     if args.files.is_empty() {
         if args.characters {
             character_mode(stdin(), stdout(), &args.range)
@@ -96,7 +96,7 @@ fn entry(args: cli::Cli) -> io::Result<()> {
 }
 
 fn main() -> io::Result<()> {
-    entry(cli::Cli::parse())
+    entry(cli::Args::parse())
 }
 
 #[cfg(test)]
