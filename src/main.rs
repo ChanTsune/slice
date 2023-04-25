@@ -1,25 +1,25 @@
-use crate::range::SliceRange;
+use crate::{iterator::IteratorExt, range::SliceRange};
 use clap::Parser;
 use std::{
     fs,
-    io::{self, stdin, stdout, BufRead, Read, Write},
+    io::{self, stdin, stdout, Read, Write},
     path::PathBuf,
 };
 
 mod cli;
+mod iterator;
 mod range;
 
 fn line_mode<R: Read, W: Write>(input: R, output: W, range: &SliceRange) -> io::Result<()> {
     let mut out = io::BufWriter::new(output);
     for line in io::BufReader::new(input)
-        .lines()
+        .lines_with_eol()
         .take(range.end)
         .skip(range.start)
         .step_by(range.step.map(|step| step.get()).unwrap_or(1))
     {
         let line = line?;
         out.write_all(line.as_bytes())?;
-        out.write_all(b"\n")?;
     }
     Ok(())
 }
@@ -292,6 +292,27 @@ mod tests {
                 assert_eq!(
                     out,
                     b"slice command is simple string slicing command.\n".repeat(5)
+                );
+            }
+
+            #[test]
+            fn without_linebreak() {
+                let mut out = Vec::new();
+                line_mode(
+                    b"slice command is simple string slicing command.\nLike a python slice syntax."
+                        .as_slice(),
+                    &mut out,
+                    &SliceRange {
+                        start: 0,
+                        end: usize::MAX,
+                        step: None,
+                    },
+                )
+                .expect("");
+
+                assert_eq!(
+                    out,
+                    b"slice command is simple string slicing command.\nLike a python slice syntax."
                 );
             }
         }
