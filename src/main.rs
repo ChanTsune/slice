@@ -102,6 +102,7 @@ fn main() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     mod line {
         use super::*;
@@ -112,11 +113,7 @@ mod tests {
             line_mode(
                 b"".as_slice(),
                 &mut out,
-                &SliceRange {
-                    start: 0,
-                    end: usize::MAX,
-                    step: None,
-                },
+                &SliceRange::from_str("::").unwrap(),
             )
             .expect("");
 
@@ -125,7 +122,6 @@ mod tests {
 
         mod one_line {
             use super::*;
-            use std::num::NonZeroUsize;
 
             #[test]
             fn no_slice() {
@@ -133,11 +129,7 @@ mod tests {
                 line_mode(
                     b"slice command is simple string slicing command.\n".as_slice(),
                     &mut out,
-                    &SliceRange {
-                        start: 0,
-                        end: usize::MAX,
-                        step: None,
-                    },
+                    &SliceRange::from_str("::").unwrap(),
                 )
                 .expect("");
 
@@ -150,11 +142,7 @@ mod tests {
                 line_mode(
                     b"slice command is simple string slicing command.\n".as_slice(),
                     &mut out,
-                    &SliceRange {
-                        start: 1,
-                        end: usize::MAX,
-                        step: None,
-                    },
+                    &SliceRange::from_str("1:").unwrap(),
                 )
                 .expect("");
 
@@ -167,11 +155,7 @@ mod tests {
                 line_mode(
                     b"slice command is simple string slicing command.\n".as_slice(),
                     &mut out,
-                    &SliceRange {
-                        start: 2,
-                        end: usize::MAX,
-                        step: None,
-                    },
+                    &SliceRange::from_str("2:").unwrap(),
                 )
                 .expect("");
 
@@ -184,11 +168,7 @@ mod tests {
                 line_mode(
                     b"slice command is simple string slicing command.\n".as_slice(),
                     &mut out,
-                    &SliceRange {
-                        start: 0,
-                        end: 0,
-                        step: None,
-                    },
+                    &SliceRange::from_str(":0").unwrap(),
                 )
                 .expect("");
 
@@ -201,11 +181,7 @@ mod tests {
                 line_mode(
                     b"slice command is simple string slicing command.\n".as_slice(),
                     &mut out,
-                    &SliceRange {
-                        start: 0,
-                        end: usize::MAX,
-                        step: NonZeroUsize::new(2),
-                    },
+                    &SliceRange::from_str("::2").unwrap(),
                 )
                 .expect("");
 
@@ -215,7 +191,6 @@ mod tests {
 
         mod multi_line {
             use super::*;
-            use std::num::NonZeroUsize;
 
             #[test]
             fn no_slice() {
@@ -224,11 +199,7 @@ mod tests {
                     b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
                         .as_slice(),
                     &mut out,
-                    &SliceRange {
-                        start: 0,
-                        end: usize::MAX,
-                        step: None,
-                    },
+                    &SliceRange::from_str("::").unwrap(),
                 )
                     .expect("");
 
@@ -245,11 +216,7 @@ mod tests {
                     b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
                         .as_slice(),
                     &mut out,
-                    &SliceRange {
-                        start: 1,
-                        end: usize::MAX,
-                        step: None,
-                    },
+                    &SliceRange::from_str("1:").unwrap(),
                 )
                     .expect("");
 
@@ -263,11 +230,7 @@ mod tests {
                     b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
                         .as_slice(),
                     &mut out,
-                    &SliceRange {
-                        start: 0,
-                        end: 1,
-                        step: None,
-                    },
+                    &SliceRange::from_str(":1").unwrap(),
                 )
                     .expect("");
 
@@ -281,11 +244,7 @@ mod tests {
                     b"slice command is simple string slicing command.\nLike a python slice syntax.\n".repeat(5)
                         .as_slice(),
                     &mut out,
-                    &SliceRange {
-                        start: 0,
-                        end: usize::MAX,
-                        step: NonZeroUsize::new(2),
-                    },
+                    &SliceRange::from_str("::2").unwrap(),
                 )
                     .expect("");
 
@@ -302,11 +261,7 @@ mod tests {
                     b"slice command is simple string slicing command.\nLike a python slice syntax."
                         .as_slice(),
                     &mut out,
-                    &SliceRange {
-                        start: 0,
-                        end: usize::MAX,
-                        step: None,
-                    },
+                    &SliceRange::from_str("::").unwrap(),
                 )
                 .expect("");
 
@@ -320,7 +275,6 @@ mod tests {
 
     mod character {
         use super::*;
-        use std::num::NonZeroUsize;
 
         #[test]
         fn empty() {
@@ -328,11 +282,7 @@ mod tests {
             character_mode(
                 b"".as_slice(),
                 &mut out,
-                &SliceRange {
-                    start: 0,
-                    end: usize::MAX,
-                    step: None,
-                },
+                &SliceRange::from_str("::").unwrap(),
             )
             .expect("");
 
@@ -346,11 +296,7 @@ mod tests {
                 b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
                     .as_slice(),
                 &mut out,
-                &SliceRange {
-                    start: 0,
-                    end: usize::MAX,
-                    step: None,
-                },
+                &SliceRange::from_str("::").unwrap(),
             )
             .expect("");
 
@@ -367,11 +313,7 @@ mod tests {
                 b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
                     .as_slice(),
                 &mut out,
-                &SliceRange {
-                    start: 10,
-                    end: usize::MAX,
-                    step: None,
-                },
+                &SliceRange::from_str("10:").unwrap(),
             )
             .expect("");
 
@@ -388,11 +330,7 @@ mod tests {
                 b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
                     .as_slice(),
                 &mut out,
-                &SliceRange {
-                    start: 0,
-                    end: 15,
-                    step: None,
-                },
+                &SliceRange::from_str(":15").unwrap(),
             )
             .expect("");
 
@@ -406,11 +344,7 @@ mod tests {
                 b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
                     .as_slice(),
                 &mut out,
-                &SliceRange {
-                    start: 5,
-                    end: 15,
-                    step: None,
-                },
+                &SliceRange::from_str("5:15").unwrap(),
             )
             .expect("");
 
@@ -424,11 +358,7 @@ mod tests {
                 b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
                     .as_slice(),
                 &mut out,
-                &SliceRange {
-                    start: 0,
-                    end: usize::MAX,
-                    step: NonZeroUsize::new(2),
-                },
+                &SliceRange::from_str("::2").unwrap(),
             )
             .expect("");
 
