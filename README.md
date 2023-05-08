@@ -34,7 +34,7 @@ After building, add the binary to your PATH to use it globally.
 
 ## Usage
 
-To use Slice, run the following command:
+To use `slice`, run the following command:
 
 ```
 slice [options] <slice> <file...>
@@ -48,7 +48,7 @@ Each value is optional and, if omitted, defaults to the beginning of the file, t
 
 ## Examples
 
-Here are some examples of how to use Slice:
+Here are some examples of how to use `slice`:
 
 ```
 slice 10:20 file.txt
