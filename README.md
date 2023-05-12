@@ -68,6 +68,13 @@ For more details, run:
 slice --help
 ```
 
+## Docker
+
+```sh
+docker build -t slice
+docker run --rm -i slice slice
+```
+
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
