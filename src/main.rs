@@ -1,4 +1,4 @@
-use crate::{iterator::BufReadExt, range::SliceRange};
+use crate::{ext::BufReadExt, range::SliceRange};
 use clap::Parser;
 use std::{
     fs,
@@ -7,7 +7,7 @@ use std::{
 };
 
 mod cli;
-mod iterator;
+mod ext;
 mod range;
 
 fn line_mode<R: Read, W: Write>(input: R, output: W, range: &SliceRange) -> io::Result<()> {
