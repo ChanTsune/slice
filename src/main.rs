@@ -1,4 +1,7 @@
-use crate::{ext::BufReadExt, range::SliceRange};
+use crate::{
+    ext::{BufReadExt, IteratorExt},
+    range::SliceRange,
+};
 use clap::Parser;
 use std::{
     fs,
@@ -14,9 +17,7 @@ fn line_mode<R: Read, W: Write>(input: R, output: W, range: &SliceRange) -> io::
     let mut out = io::BufWriter::new(output);
     for line in io::BufReader::new(input)
         .lines_with_eol()
-        .take(range.end)
-        .skip(range.start)
-        .step_by(range.step.map(|step| step.get()).unwrap_or(1))
+        .slice(range.start, range.end, range.step)
     {
         let line = line?;
         out.write_all(line.as_bytes())?;
@@ -28,9 +29,7 @@ fn character_mode<R: Read, W: Write>(input: R, output: W, range: &SliceRange) ->
     let mut out = io::BufWriter::new(output);
     for byte in io::BufReader::new(input)
         .bytes()
-        .take(range.end)
-        .skip(range.start)
-        .step_by(range.step.map(|step| step.get()).unwrap_or(1))
+        .slice(range.start, range.end, range.step)
     {
         out.write_all(&[byte?])?;
     }
