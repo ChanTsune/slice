@@ -1,4 +1,4 @@
-use crate::{iterator::IteratorExt, range::SliceRange};
+use crate::{iterator::BufReadExt, range::SliceRange};
 use clap::Parser;
 use std::{
     fs,
