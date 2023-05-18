@@ -18,7 +18,7 @@ impl<B: BufRead> Iterator for LinesWithEol<B> {
     }
 }
 
-pub(crate) trait IteratorExt {
+pub(crate) trait BufReadExt {
     fn lines_with_eol(self) -> LinesWithEol<Self>
     where
         Self: Sized,
@@ -27,4 +27,4 @@ pub(crate) trait IteratorExt {
     }
 }
 
-impl<B: BufRead> IteratorExt for B {}
+impl<B: BufRead> BufReadExt for B {}
