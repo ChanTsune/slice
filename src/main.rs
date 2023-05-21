@@ -269,6 +269,19 @@ mod tests {
                     b"slice command is simple string slicing command.\nLike a python slice syntax."
                 );
             }
+
+            #[test]
+            fn binary_stream() {
+                let mut out = Vec::new();
+                line_mode(
+                    b"slice\xaabinary stream\nslice binary\xaastream".as_slice(),
+                    &mut out,
+                    &SliceRange::from_str("::").unwrap(),
+                )
+                .expect("");
+
+                assert_eq!(out, b"slice\xaabinary stream\nslice binary\xaastream");
+            }
         }
     }
 
