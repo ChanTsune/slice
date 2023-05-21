@@ -6,11 +6,11 @@ pub(crate) struct LinesWithEol<B> {
 }
 
 impl<B: BufRead> Iterator for LinesWithEol<B> {
-    type Item = io::Result<String>;
+    type Item = io::Result<Vec<u8>>;
 
-    fn next(&mut self) -> Option<io::Result<String>> {
-        let mut buf = String::new();
-        match self.buf.read_line(&mut buf) {
+    fn next(&mut self) -> Option<io::Result<Vec<u8>>> {
+        let mut buf = Default::default();
+        match self.buf.read_until(b'\n', &mut buf) {
             Ok(0) => None,
             Ok(_n) => Some(Ok(buf)),
             Err(e) => Some(Err(e)),

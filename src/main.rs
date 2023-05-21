@@ -19,8 +19,7 @@ fn line_mode<R: Read, W: Write>(input: R, output: W, range: &SliceRange) -> io::
         .lines_with_eol()
         .slice(range.start, range.end, range.step)
     {
-        let line = line?;
-        out.write_all(line.as_bytes())?;
+        out.write_all(&line?)?;
     }
     Ok(())
 }
