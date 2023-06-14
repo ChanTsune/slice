@@ -6,7 +6,12 @@ WORKDIR /work
 
 RUN cargo build --release
 
-FROM debian:buster-slim
-COPY --from=builder /work/target/release/slice /usr/local/bin/slice
+FROM gcr.io/distroless/cc
 
-ENTRYPOINT ["slice"]
+WORKDIR /
+
+COPY --from=builder /work/target/release/slice /slice
+
+USER nonroot
+
+ENTRYPOINT ["/slice"]
