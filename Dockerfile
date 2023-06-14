@@ -6,6 +6,8 @@ WORKDIR /work
 
 RUN cargo build --release
 
+RUN strip /work/target/release/slice
+
 FROM gcr.io/distroless/cc
 
 WORKDIR /
