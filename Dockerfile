@@ -8,4 +8,5 @@ RUN cargo build --release
 
 FROM debian:buster-slim
 COPY --from=builder /work/target/release/slice /usr/local/bin/slice
-CMD ["slice"]
+
+ENTRYPOINT ["slice"]
