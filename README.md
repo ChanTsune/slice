@@ -72,7 +72,7 @@ slice --help
 
 ```sh
 docker build -t slice .
-docker run --rm -i slice slice
+docker run -v `pwd`:`pwd` -w `pwd` --rm -i slice
 ```
 
 ## License
