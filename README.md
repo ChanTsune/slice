@@ -71,7 +71,7 @@ slice --help
 ## Docker
 
 ```sh
-docker build -t slice
+docker build -t slice .
 docker run --rm -i slice slice
 ```
 
