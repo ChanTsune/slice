@@ -2,9 +2,9 @@ FROM rust:latest as builder
 
 RUN rustup target add "$(uname -m)"-unknown-linux-musl
 
-COPY ./ /work
-
 WORKDIR /work
+
+COPY . .
 
 RUN cargo build --release --target "$(uname -m)"-unknown-linux-musl
 
