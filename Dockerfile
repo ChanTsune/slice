@@ -10,12 +10,10 @@ RUN cargo build --release --target "$(uname -m)"-unknown-linux-musl
 
 RUN strip /work/target/"$(uname -m)"-unknown-linux-musl/release/slice -o /slice
 
-FROM gcr.io/distroless/static
+FROM gcr.io/distroless/static:nonroot as binary
 
 WORKDIR /
 
 COPY --from=builder /slice /
-
-USER nonroot
 
 ENTRYPOINT ["/slice"]
