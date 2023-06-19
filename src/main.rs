@@ -54,21 +54,21 @@ fn multi<W: Write, F: Fn(fs::File, &W, &SliceRange) -> io::Result<()>>(
 fn entry(args: cli::Args) -> io::Result<()> {
     if args.files.is_empty() {
         if args.characters {
-            character_mode(stdin(), stdout(), &args.range)
+            character_mode(stdin(), stdout().lock(), &args.range)
         } else {
-            line_mode(stdin(), stdout(), &args.range)
+            line_mode(stdin(), stdout().lock(), &args.range)
         }
     } else if args.files.len() == 1 {
         if args.characters {
             character_mode(
                 fs::File::open(args.files.first().expect(""))?,
-                stdout(),
+                stdout().lock(),
                 &args.range,
             )
         } else {
             line_mode(
                 fs::File::open(args.files.first().expect(""))?,
-                stdout(),
+                stdout().lock(),
                 &args.range,
             )
         }
