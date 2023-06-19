@@ -21,7 +21,7 @@ fn line_mode<R: Read, W: Write>(input: R, output: W, range: &SliceRange) -> io::
     {
         out.write_all(&line?)?;
     }
-    Ok(())
+    out.flush()
 }
 
 fn character_mode<R: Read, W: Write>(input: R, output: W, range: &SliceRange) -> io::Result<()> {
@@ -32,7 +32,7 @@ fn character_mode<R: Read, W: Write>(input: R, output: W, range: &SliceRange) ->
     {
         out.write_all(&[byte?])?;
     }
-    Ok(())
+    out.flush()
 }
 
 fn multi<W: Write, F: Fn(fs::File, &W, &SliceRange) -> io::Result<()>>(
