@@ -61,13 +61,13 @@ fn entry(args: cli::Args) -> io::Result<()> {
     } else if args.files.len() == 1 {
         if args.characters {
             character_mode(
-                fs::File::open(args.files.first().expect(""))?,
+                fs::File::open(&args.files[0])?,
                 stdout().lock(),
                 &args.range,
             )
         } else {
             line_mode(
-                fs::File::open(args.files.first().expect(""))?,
+                fs::File::open(&args.files[0])?,
                 stdout().lock(),
                 &args.range,
             )
