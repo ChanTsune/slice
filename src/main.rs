@@ -35,9 +35,9 @@ fn character_mode<R: Read, W: Write>(input: R, output: W, range: &SliceRange) ->
     out.flush()
 }
 
-fn multi<W: Write, F: Fn(fs::File, &W, &SliceRange) -> io::Result<()>>(
+fn multi<W: Write, F: Fn(fs::File, &mut W, &SliceRange) -> io::Result<()>>(
     targets: Vec<PathBuf>,
-    mut out: W,
+    out: &mut W,
     range: &SliceRange,
     print_header: bool,
     f: F,
@@ -46,7 +46,7 @@ fn multi<W: Write, F: Fn(fs::File, &W, &SliceRange) -> io::Result<()>>(
         if print_header {
             writeln!(out, "==> {} <==", target.display())?;
         }
-        f(fs::File::open(target)?, &out, range)?;
+        f(fs::File::open(target)?, out, range)?;
     }
     Ok(())
 }
@@ -76,7 +76,7 @@ fn entry(args: cli::Args) -> io::Result<()> {
         if args.characters {
             multi(
                 args.files,
-                stdout(),
+                &mut stdout().lock(),
                 &args.range,
                 !args.quiet_headers,
                 |input, output, range| character_mode(input, output, range),
@@ -84,7 +84,7 @@ fn entry(args: cli::Args) -> io::Result<()> {
         } else {
             multi(
                 args.files,
-                stdout(),
+                &mut stdout().lock(),
                 &args.range,
                 !args.quiet_headers,
                 |input, output, range| line_mode(input, output, range),
