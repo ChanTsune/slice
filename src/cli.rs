@@ -1,4 +1,5 @@
 use crate::range::SliceRange;
+use bytesize::ByteSize;
 use clap::{ArgGroup, Parser};
 use std::path::PathBuf;
 
@@ -30,9 +31,16 @@ pub(crate) struct Args {
         long,
         help = "Set the size of the I/O buffer. This buffer is used for both input and output operations (experimental)"
     )]
-    pub(crate) io_buffer_size: Option<usize>,
+    pub(crate) io_buffer_size: Option<ByteSize>,
     #[arg(help = "Target files. if not provided use stdin")]
     pub(crate) files: Vec<PathBuf>,
+}
+
+impl Args {
+    #[inline]
+    pub(crate) fn io_buffer_size(&self) -> Option<usize> {
+        self.io_buffer_size.map(|it| it.0 as usize)
+    }
 }
 
 #[cfg(test)]

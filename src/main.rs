@@ -70,51 +70,50 @@ fn entry(args: cli::Args) -> io::Result<()> {
     if args.files.is_empty() {
         if args.characters {
             character_mode(
-                buf_reader(stdin().lock(), args.io_buffer_size),
-                buf_writer(stdout().lock(), args.io_buffer_size),
+                buf_reader(stdin().lock(), args.io_buffer_size()),
+                buf_writer(stdout().lock(), args.io_buffer_size()),
                 &args.range,
             )
         } else {
             line_mode(
-                buf_reader(stdin().lock(), args.io_buffer_size),
-                buf_writer(stdout().lock(), args.io_buffer_size),
+                buf_reader(stdin().lock(), args.io_buffer_size()),
+                buf_writer(stdout().lock(), args.io_buffer_size()),
                 &args.range,
             )
         }
     } else if args.files.len() == 1 {
         if args.characters {
             character_mode(
-                buf_reader(fs::File::open(&args.files[0])?, args.io_buffer_size),
-                buf_writer(stdout().lock(), args.io_buffer_size),
+                buf_reader(fs::File::open(&args.files[0])?, args.io_buffer_size()),
+                buf_writer(stdout().lock(), args.io_buffer_size()),
                 &args.range,
             )
         } else {
             line_mode(
-                buf_reader(fs::File::open(&args.files[0])?, args.io_buffer_size),
-                buf_writer(stdout().lock(), args.io_buffer_size),
+                buf_reader(fs::File::open(&args.files[0])?, args.io_buffer_size()),
+                buf_writer(stdout().lock(), args.io_buffer_size()),
                 &args.range,
             )
         }
     } else {
+        let io_buffer_size = args.io_buffer_size();
         if args.characters {
             multi(
                 args.files,
-                &mut buf_writer(stdout().lock(), args.io_buffer_size),
+                &mut buf_writer(stdout().lock(), io_buffer_size),
                 &args.range,
                 !args.quiet_headers,
                 |input, output, range| {
-                    character_mode(buf_reader(input, args.io_buffer_size), output, range)
+                    character_mode(buf_reader(input, io_buffer_size), output, range)
                 },
             )
         } else {
             multi(
                 args.files,
-                &mut buf_writer(stdout().lock(), args.io_buffer_size),
+                &mut buf_writer(stdout().lock(), io_buffer_size),
                 &args.range,
                 !args.quiet_headers,
-                |input, output, range| {
-                    line_mode(buf_reader(input, args.io_buffer_size), output, range)
-                },
+                |input, output, range| line_mode(buf_reader(input, io_buffer_size), output, range),
             )
         }
     }
