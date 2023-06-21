@@ -5,7 +5,7 @@ use crate::{
 use clap::Parser;
 use std::{
     fs,
-    io::{self, stdin, stdout, Read, Write},
+    io::{self, stdin, stdout, BufRead, Read, Write},
     path::PathBuf,
 };
 
@@ -13,26 +13,41 @@ mod cli;
 mod ext;
 mod range;
 
-fn line_mode<R: Read, W: Write>(input: R, output: W, range: &SliceRange) -> io::Result<()> {
-    let mut out = io::BufWriter::new(output);
-    for line in io::BufReader::new(input)
+fn buf_reader<R: Read>(reader: R, capacity: Option<usize>) -> io::BufReader<R> {
+    if let Some(capacity) = capacity {
+        io::BufReader::with_capacity(capacity, reader)
+    } else {
+        io::BufReader::new(reader)
+    }
+}
+
+fn buf_writer<W: Write>(writer: W, capacity: Option<usize>) -> io::BufWriter<W> {
+    if let Some(capacity) = capacity {
+        io::BufWriter::with_capacity(capacity, writer)
+    } else {
+        io::BufWriter::new(writer)
+    }
+}
+
+fn line_mode<R: BufRead, W: Write>(input: R, mut output: W, range: &SliceRange) -> io::Result<()> {
+    for line in input
         .lines_with_eol()
         .slice(range.start, range.end, range.step)
     {
-        out.write_all(&line?)?;
+        output.write_all(&line?)?;
     }
-    out.flush()
+    output.flush()
 }
 
-fn character_mode<R: Read, W: Write>(input: R, output: W, range: &SliceRange) -> io::Result<()> {
-    let mut out = io::BufWriter::new(output);
-    for byte in io::BufReader::new(input)
-        .bytes()
-        .slice(range.start, range.end, range.step)
-    {
-        out.write_all(&[byte?])?;
+fn character_mode<R: BufRead, W: Write>(
+    input: R,
+    mut output: W,
+    range: &SliceRange,
+) -> io::Result<()> {
+    for byte in input.bytes().slice(range.start, range.end, range.step) {
+        output.write_all(&[byte?])?;
     }
-    out.flush()
+    output.flush()
 }
 
 fn multi<W: Write, F: Fn(fs::File, &mut W, &SliceRange) -> io::Result<()>>(
@@ -54,21 +69,29 @@ fn multi<W: Write, F: Fn(fs::File, &mut W, &SliceRange) -> io::Result<()>>(
 fn entry(args: cli::Args) -> io::Result<()> {
     if args.files.is_empty() {
         if args.characters {
-            character_mode(stdin().lock(), stdout().lock(), &args.range)
-        } else {
-            line_mode(stdin().lock(), stdout().lock(), &args.range)
-        }
-    } else if args.files.len() == 1 {
-        if args.characters {
             character_mode(
-                fs::File::open(&args.files[0])?,
-                stdout().lock(),
+                buf_reader(stdin().lock(), args.io_buffer_size),
+                buf_writer(stdout().lock(), args.io_buffer_size),
                 &args.range,
             )
         } else {
             line_mode(
-                fs::File::open(&args.files[0])?,
-                stdout().lock(),
+                buf_reader(stdin().lock(), args.io_buffer_size),
+                buf_writer(stdout().lock(), args.io_buffer_size),
+                &args.range,
+            )
+        }
+    } else if args.files.len() == 1 {
+        if args.characters {
+            character_mode(
+                buf_reader(fs::File::open(&args.files[0])?, args.io_buffer_size),
+                buf_writer(stdout().lock(), args.io_buffer_size),
+                &args.range,
+            )
+        } else {
+            line_mode(
+                buf_reader(fs::File::open(&args.files[0])?, args.io_buffer_size),
+                buf_writer(stdout().lock(), args.io_buffer_size),
                 &args.range,
             )
         }
@@ -76,18 +99,22 @@ fn entry(args: cli::Args) -> io::Result<()> {
         if args.characters {
             multi(
                 args.files,
-                &mut stdout().lock(),
+                &mut buf_writer(stdout().lock(), args.io_buffer_size),
                 &args.range,
                 !args.quiet_headers,
-                |input, output, range| character_mode(input, output, range),
+                |input, output, range| {
+                    character_mode(buf_reader(input, args.io_buffer_size), output, range)
+                },
             )
         } else {
             multi(
                 args.files,
-                &mut stdout().lock(),
+                &mut buf_writer(stdout().lock(), args.io_buffer_size),
                 &args.range,
                 !args.quiet_headers,
-                |input, output, range| line_mode(input, output, range),
+                |input, output, range| {
+                    line_mode(buf_reader(input, args.io_buffer_size), output, range)
+                },
             )
         }
     }
