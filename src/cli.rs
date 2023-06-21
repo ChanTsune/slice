@@ -1,7 +1,23 @@
 use crate::range::SliceRange;
 use bytesize::ByteSize;
 use clap::{ArgGroup, Parser};
-use std::path::PathBuf;
+use std::{path::PathBuf, str::FromStr};
+
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub struct NonZeroByteSize(ByteSize);
+
+impl FromStr for NonZeroByteSize {
+    type Err = <ByteSize as FromStr>::Err;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bs = ByteSize::from_str(s)?;
+        if bs.0 == 0 {
+            Err(Self::Err::from("0 is not allowed"))
+        } else {
+            Ok(Self(bs))
+        }
+    }
+}
 
 #[derive(Parser, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 #[command(
@@ -31,7 +47,7 @@ pub(crate) struct Args {
         long,
         help = "Set the size of the I/O buffer. This buffer is used for both input and output operations (experimental)"
     )]
-    pub(crate) io_buffer_size: Option<ByteSize>,
+    pub(crate) io_buffer_size: Option<NonZeroByteSize>,
     #[arg(help = "Target files. if not provided use stdin")]
     pub(crate) files: Vec<PathBuf>,
 }
@@ -39,7 +55,7 @@ pub(crate) struct Args {
 impl Args {
     #[inline]
     pub(crate) fn io_buffer_size(&self) -> Option<usize> {
-        self.io_buffer_size.map(|it| it.0 as usize)
+        self.io_buffer_size.map(|it| it.0.as_u64() as usize)
     }
 }
 
