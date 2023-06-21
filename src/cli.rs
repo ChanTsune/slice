@@ -26,6 +26,11 @@ pub(crate) struct Args {
         help = "Suppresses printing of headers when multiple files are being examined"
     )]
     pub(crate) quiet_headers: bool,
+    #[arg(
+        long,
+        help = "Set the size of the I/O buffer. This buffer is used for both input and output operations (experimental)"
+    )]
+    pub(crate) io_buffer_size: Option<usize>,
     #[arg(help = "Target files. if not provided use stdin")]
     pub(crate) files: Vec<PathBuf>,
 }
