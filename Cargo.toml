@@ -1,6 +1,6 @@
 [package]
 name = "slice-command"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 description = "slice is a command-line tool that allows you to slice the contents of a file using syntax similar to Python's slice notation."
