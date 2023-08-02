@@ -11,10 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-
-      - name: Install Rust toolchain
-        run: rustup update --no-self-update stable && rustup default stable
-
+      - uses: ./.github/actions/setup-rust
       - name: Publish crate
         run: cargo publish
         env:
