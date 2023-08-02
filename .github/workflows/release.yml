@@ -94,11 +94,10 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v3
 
-    - name: Install Rust toolchain
-      run: |
-        rustup update --no-self-update ${{ matrix.rust }}
-        rustup target add ${{ matrix.target }}
-        rustup default ${{ matrix.rust }}
+    - uses: ./.github/actions/setup-rust
+      with:
+        channel: ${{ matrix.rust }}
+        target: ${{ matrix.target }}
 
     - name: Setup cross
       shell: bash
