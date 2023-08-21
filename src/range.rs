@@ -147,27 +147,25 @@ mod tests {
         use super::*;
 
         #[test]
-        #[should_panic]
         fn empty() {
-            SliceRange::from_str("").expect("");
+            assert!(SliceRange::from_str("").is_err());
         }
 
         #[test]
-        #[should_panic]
         fn non_integer_start() {
-            SliceRange::from_str("a:1:1").expect("");
+            assert!(SliceRange::from_str("a:1").is_err());
+            assert!(SliceRange::from_str("a:1:1").is_err());
         }
 
         #[test]
-        #[should_panic]
         fn non_integer_end() {
-            SliceRange::from_str("1:a:1").expect("");
+            assert!(SliceRange::from_str("1:a").is_err());
+            assert!(SliceRange::from_str("1:a:1").is_err());
         }
 
         #[test]
-        #[should_panic]
         fn non_integer_step() {
-            SliceRange::from_str("1:1:b").expect("");
+            assert!(SliceRange::from_str("1:1:b").is_err());
         }
     }
 }
