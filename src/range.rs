@@ -23,19 +23,19 @@ impl FromStr for SliceRange {
             }
             .map_err(|e| e.to_string())
         }
-        let ptn = s.split(':').collect::<Vec<_>>();
+        let mut ptn = s.split(':');
         Ok(Self {
             start: parse_or(
-                ptn.first()
+                ptn.next()
                     .ok_or_else(|| String::from("range start must be needed"))?,
                 0,
             )?,
             end: parse_or(
-                ptn.get(1)
+                ptn.next()
                     .ok_or_else(|| String::from("range end must be needed"))?,
                 usize::MAX,
             )?,
-            step: match ptn.get(2) {
+            step: match ptn.next() {
                 Some(step) => Some(parse_or(step, unsafe { NonZeroUsize::new_unchecked(1) })?),
                 None => None,
             },
