@@ -50,9 +50,15 @@ fn character_mode<R: BufRead, W: Write>(
     output.flush()
 }
 
-fn multi<W: Write, F: Fn(fs::File, &mut W, &SliceRange) -> io::Result<()>>(
-    targets: Vec<PathBuf>,
-    out: &mut W,
+fn multi<
+    W: Write,
+    R: BufRead,
+    IW: Fn(fs::File) -> R,
+    F: Fn(R, &mut W, &SliceRange) -> io::Result<()>,
+>(
+    targets: &[PathBuf],
+    mut out: W,
+    input_wrapper: IW,
     range: &SliceRange,
     print_header: bool,
     f: F,
@@ -61,7 +67,8 @@ fn multi<W: Write, F: Fn(fs::File, &mut W, &SliceRange) -> io::Result<()>>(
         if print_header {
             writeln!(out, "==> {} <==", target.display())?;
         }
-        f(fs::File::open(target)?, out, range)?;
+        let reader = input_wrapper(fs::File::open(target)?);
+        f(reader, &mut out, range)?;
     }
     Ok(())
 }
@@ -99,21 +106,21 @@ fn entry(args: cli::Args) -> io::Result<()> {
         let io_buffer_size = args.io_buffer_size();
         if args.characters {
             multi(
-                args.files,
-                &mut buf_writer(stdout().lock(), io_buffer_size),
+                &args.files,
+                buf_writer(stdout().lock(), io_buffer_size),
+                |input| buf_reader(input, io_buffer_size),
                 &args.range,
                 !args.quiet_headers,
-                |input, output, range| {
-                    character_mode(buf_reader(input, io_buffer_size), output, range)
-                },
+                |input, output, range| character_mode(input, output, range),
             )
         } else {
             multi(
-                args.files,
-                &mut buf_writer(stdout().lock(), io_buffer_size),
+                &args.files,
+                buf_writer(stdout().lock(), io_buffer_size),
+                |input| buf_reader(input, io_buffer_size),
                 &args.range,
                 !args.quiet_headers,
-                |input, output, range| line_mode(buf_reader(input, io_buffer_size), output, range),
+                |input, output, range| line_mode(input, output, range),
             )
         }
     }
