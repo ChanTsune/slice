@@ -39,6 +39,21 @@ fn line_mode<R: BufRead, W: Write>(input: R, mut output: W, range: &SliceRange) 
     output.flush()
 }
 
+fn delimit_mode<R: BufRead, W: Write>(
+    input: R,
+    mut output: W,
+    delimiter: &[u8],
+    range: &SliceRange,
+) -> io::Result<()> {
+    for part in input
+        .delimit_by(delimiter)
+        .slice(range.start, range.end, range.step)
+    {
+        output.write_all(&part?)?;
+    }
+    output.flush()
+}
+
 fn character_mode<R: BufRead, W: Write>(
     input: R,
     mut output: W,
@@ -75,48 +90,50 @@ fn multi<
 
 fn entry(args: cli::Args) -> io::Result<()> {
     if args.files.is_empty() {
+        let input = buf_reader(stdin().lock(), args.io_buffer_size());
+        let output = buf_writer(stdout().lock(), args.io_buffer_size());
         if args.characters {
-            character_mode(
-                buf_reader(stdin().lock(), args.io_buffer_size()),
-                buf_writer(stdout().lock(), args.io_buffer_size()),
-                &args.range,
-            )
+            character_mode(input, output, &args.range)
+        } else if let Some(delimiter) = args.delimiter {
+            delimit_mode(input, output, delimiter.as_bytes(), &args.range)
         } else {
-            line_mode(
-                buf_reader(stdin().lock(), args.io_buffer_size()),
-                buf_writer(stdout().lock(), args.io_buffer_size()),
-                &args.range,
-            )
+            line_mode(input, output, &args.range)
         }
     } else if args.files.len() == 1 {
+        let input = buf_reader(fs::File::open(&args.files[0])?, args.io_buffer_size());
+        let output = buf_writer(stdout().lock(), args.io_buffer_size());
         if args.characters {
-            character_mode(
-                buf_reader(fs::File::open(&args.files[0])?, args.io_buffer_size()),
-                buf_writer(stdout().lock(), args.io_buffer_size()),
-                &args.range,
-            )
+            character_mode(input, output, &args.range)
+        } else if let Some(delimiter) = args.delimiter {
+            delimit_mode(input, output, delimiter.as_bytes(), &args.range)
         } else {
-            line_mode(
-                buf_reader(fs::File::open(&args.files[0])?, args.io_buffer_size()),
-                buf_writer(stdout().lock(), args.io_buffer_size()),
-                &args.range,
-            )
+            line_mode(input, output, &args.range)
         }
     } else {
         let io_buffer_size = args.io_buffer_size();
+        let output = buf_writer(stdout().lock(), io_buffer_size);
         if args.characters {
             multi(
                 &args.files,
-                buf_writer(stdout().lock(), io_buffer_size),
+                output,
                 |input| buf_reader(input, io_buffer_size),
                 &args.range,
                 !args.quiet_headers,
                 |input, output, range| character_mode(input, output, range),
             )
+        } else if let Some(delimiter) = args.delimiter {
+            multi(
+                &args.files,
+                output,
+                |input| buf_reader(input, io_buffer_size),
+                &args.range,
+                !args.quiet_headers,
+                |input, output, range| delimit_mode(input, output, delimiter.as_bytes(), range),
+            )
         } else {
             multi(
                 &args.files,
-                buf_writer(stdout().lock(), io_buffer_size),
+                output,
                 |input| buf_reader(input, io_buffer_size),
                 &args.range,
                 !args.quiet_headers,

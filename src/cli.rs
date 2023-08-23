@@ -38,6 +38,8 @@ pub(crate) struct Args {
     pub(crate) lines: bool,
     #[arg(short, help = "Slice the characters")]
     pub(crate) characters: bool,
+    #[arg(long, help = "Slice by delimiter")]
+    pub(crate) delimiter: Option<String>,
     #[arg(
         short,
         help = "Suppresses printing of headers when multiple files are being examined"
