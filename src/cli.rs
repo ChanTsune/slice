@@ -9,6 +9,7 @@ pub struct NonZeroByteSize(ByteSize);
 impl FromStr for NonZeroByteSize {
     type Err = <ByteSize as FromStr>::Err;
 
+    #[inline]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let bs = ByteSize::from_str(s)?;
         if bs.0 == 0 {

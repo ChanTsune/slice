@@ -8,6 +8,7 @@ pub(crate) struct LinesWithEol<B> {
 impl<B: BufRead> Iterator for LinesWithEol<B> {
     type Item = io::Result<Vec<u8>>;
 
+    #[inline]
     fn next(&mut self) -> Option<io::Result<Vec<u8>>> {
         let mut buf = Default::default();
         match self.buf.read_until(b'\n', &mut buf) {
@@ -27,6 +28,7 @@ pub(crate) struct Delimited<'d, B> {
 impl<'d, B: BufRead> Iterator for Delimited<'d, B> {
     type Item = io::Result<Vec<u8>>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(last) = self.delimiter.last() {
             let mut buf = Default::default();
@@ -53,6 +55,7 @@ impl<'d, B: BufRead> Iterator for Delimited<'d, B> {
 }
 
 pub(crate) trait BufReadExt {
+    #[inline]
     fn lines_with_eol(self) -> LinesWithEol<Self>
     where
         Self: Sized,
@@ -60,6 +63,7 @@ pub(crate) trait BufReadExt {
         LinesWithEol { buf: self }
     }
 
+    #[inline]
     fn delimit_by(self, delimiter: &[u8]) -> Delimited<Self>
     where
         Self: Sized,
