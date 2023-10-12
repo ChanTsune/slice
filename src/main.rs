@@ -13,6 +13,7 @@ mod cli;
 mod ext;
 mod range;
 
+#[inline]
 fn buf_reader<R: Read>(reader: R, capacity: Option<usize>) -> io::BufReader<R> {
     if let Some(capacity) = capacity {
         io::BufReader::with_capacity(capacity, reader)
@@ -21,6 +22,7 @@ fn buf_reader<R: Read>(reader: R, capacity: Option<usize>) -> io::BufReader<R> {
     }
 }
 
+#[inline]
 fn buf_writer<W: Write>(writer: W, capacity: Option<usize>) -> io::BufWriter<W> {
     if let Some(capacity) = capacity {
         io::BufWriter::with_capacity(capacity, writer)
@@ -29,6 +31,7 @@ fn buf_writer<W: Write>(writer: W, capacity: Option<usize>) -> io::BufWriter<W> 
     }
 }
 
+#[inline]
 fn line_mode<R: BufRead, W: Write>(input: R, mut output: W, range: &SliceRange) -> io::Result<()> {
     for line in input
         .lines_with_eol()
@@ -39,6 +42,7 @@ fn line_mode<R: BufRead, W: Write>(input: R, mut output: W, range: &SliceRange) 
     output.flush()
 }
 
+#[inline]
 fn delimit_mode<R: BufRead, W: Write>(
     input: R,
     mut output: W,
@@ -54,6 +58,7 @@ fn delimit_mode<R: BufRead, W: Write>(
     output.flush()
 }
 
+#[inline]
 fn character_mode<R: BufRead, W: Write>(
     input: R,
     mut output: W,
@@ -65,6 +70,7 @@ fn character_mode<R: BufRead, W: Write>(
     output.flush()
 }
 
+#[inline]
 fn multi<
     W: Write,
     R: BufRead,

@@ -9,6 +9,7 @@ pub(crate) struct Slice<R> {
 }
 
 impl<R: Iterator> Slice<R> {
+    #[inline]
     fn new(r: R, start: usize, end: usize, step: Option<NonZeroUsize>) -> Self {
         Self {
             r: r.take(end)
@@ -20,13 +21,14 @@ impl<R: Iterator> Slice<R> {
 
 impl<I: Iterator> Iterator for Slice<I> {
     type Item = <I as Iterator>::Item;
-
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         self.r.next()
     }
 }
 
 pub(crate) trait IteratorExt {
+    #[inline]
     fn slice(self, start: usize, stop: usize, skip: Option<NonZeroUsize>) -> Slice<Self>
     where
         Self: Sized + Iterator,
