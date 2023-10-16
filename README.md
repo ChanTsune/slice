@@ -62,6 +62,11 @@ slice :100:2 file.txt
 
 This command slices the contents of `file.txt` from the beginning of the file to line 100, skipping every second line.
 
+```
+slice 5:+10 file.txt
+```
+This command is same as `slice 5:15 file.txt`.
+
 For more details, run:
 
 ```sh

@@ -24,22 +24,23 @@ impl FromStr for SliceRange {
             .map_err(|e| e.to_string())
         }
         let mut ptn = s.split(':');
-        Ok(Self {
-            start: parse_or(
-                ptn.next()
-                    .ok_or_else(|| String::from("range start must be needed"))?,
-                0,
-            )?,
-            end: parse_or(
-                ptn.next()
-                    .ok_or_else(|| String::from("range end must be needed"))?,
-                usize::MAX,
-            )?,
-            step: match ptn.next() {
-                Some(step) => Some(parse_or(step, unsafe { NonZeroUsize::new_unchecked(1) })?),
-                None => None,
-            },
-        })
+        let maybe_start = ptn
+            .next()
+            .ok_or_else(|| "range start must be needed".to_owned())?;
+        let start = parse_or(maybe_start, 0)?;
+        let maybe_end = ptn
+            .next()
+            .ok_or_else(|| "range end must be needed".to_owned())?;
+        let end = if maybe_end.starts_with('+') {
+            start + parse_or(&maybe_end[1..], usize::MAX)?
+        } else {
+            parse_or(maybe_end, usize::MAX)?
+        };
+        let step = match ptn.next() {
+            Some(step) => Some(parse_or(step, unsafe { NonZeroUsize::new_unchecked(1) })?),
+            None => None,
+        };
+        Ok(Self { start, end, step })
     }
 }
 
@@ -141,6 +142,19 @@ mod tests {
                 step: NonZeroUsize::new(1),
             }
         );
+    }
+
+    #[test]
+    fn plus_sign() {
+        let slice = SliceRange::from_str("1:+1").expect("parse failed.");
+        assert_eq!(
+            slice,
+            SliceRange {
+                start: 1,
+                end: 2,
+                step: None,
+            }
+        )
     }
 
     mod invalid {

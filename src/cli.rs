@@ -30,8 +30,11 @@ impl FromStr for NonZeroByteSize {
 )]
 pub(crate) struct Args {
     #[arg(
-        help = "The slice syntax is similar to Python's slice syntax, with the format `start:end:step`. Each value is optional and, if omitted, defaults to the beginning of the file, the end of the file, and a step of 1, respectively.
- eg. '1:100:1'"
+        help = "The slice syntax is similar to Python's slice syntax, with the format `start:end:step`.
+Each value is optional and, if omitted, defaults to the start of the file, the end of the file, and a step of 1, respectively.
+e.g., '50:100', '50:100:1'
+and the extended syntax 'start:+line' is supported. (experimental)
+e.g., '50:+50'"
     )]
     pub(crate) range: SliceRange,
     #[arg(short, help = "Slice the lines (default)")]
