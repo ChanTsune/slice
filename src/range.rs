@@ -31,11 +31,11 @@ impl FromStr for SliceRange {
         let maybe_end = ptn
             .next()
             .ok_or_else(|| "range end must be needed".to_owned())?;
-        let (start, end) = if maybe_end.starts_with("+-") {
-            let lines = parse_or(&maybe_end[2..], usize::MAX)?;
+        let (start, end) = if let Some(maybe_lines) = maybe_end.strip_prefix("+-") {
+            let lines = parse_or(maybe_lines, usize::MAX)?;
             (start - lines, start + lines)
-        } else if maybe_end.starts_with('+') {
-            let lines = parse_or(&maybe_end[1..], usize::MAX)?;
+        } else if let Some(maybe_lines) = maybe_end.strip_prefix('+') {
+            let lines = parse_or(maybe_lines, usize::MAX)?;
             (start, start + lines)
         } else {
             (start, parse_or(maybe_end, usize::MAX)?)
