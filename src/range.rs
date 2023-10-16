@@ -31,10 +31,14 @@ impl FromStr for SliceRange {
         let maybe_end = ptn
             .next()
             .ok_or_else(|| "range end must be needed".to_owned())?;
-        let end = if maybe_end.starts_with('+') {
-            start + parse_or(&maybe_end[1..], usize::MAX)?
+        let (start, end) = if maybe_end.starts_with("+-") {
+            let lines = parse_or(&maybe_end[2..], usize::MAX)?;
+            (start - lines, start + lines)
+        } else if maybe_end.starts_with('+') {
+            let lines = parse_or(&maybe_end[1..], usize::MAX)?;
+            (start, start + lines)
         } else {
-            parse_or(maybe_end, usize::MAX)?
+            (start, parse_or(maybe_end, usize::MAX)?)
         };
         let step = match ptn.next() {
             Some(step) => Some(parse_or(step, unsafe { NonZeroUsize::new_unchecked(1) })?),
@@ -152,6 +156,19 @@ mod tests {
             SliceRange {
                 start: 1,
                 end: 2,
+                step: None,
+            }
+        )
+    }
+
+    #[test]
+    fn plus_minus_sign() {
+        let slice = SliceRange::from_str("100:+-10").expect("parse failed.");
+        assert_eq!(
+            slice,
+            SliceRange {
+                start: 90,
+                end: 110,
                 step: None,
             }
         )
