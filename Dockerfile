@@ -1,4 +1,4 @@
-FROM rust:latest as builder
+FROM rust:slim as builder
 
 RUN rustup target add "$(uname -m)"-unknown-linux-musl
 
