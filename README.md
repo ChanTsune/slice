@@ -17,6 +17,12 @@ brew tap chantsune/tap
 brew install slice
 ```
 
+### Via Nix
+
+```sh
+nix-env --install -f https://github.com/chantsune/slice/tarball/main
+```
+
 ### Via Cargo
 
 ```sh
@@ -24,6 +30,7 @@ cargo install slice-command
 ```
 
 ### From Source (via Cargo)
+
 ```sh
 git clone https://github.com/ChanTsune/slice.git
 cd slice
