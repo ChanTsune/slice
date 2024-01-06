@@ -50,19 +50,19 @@ Each value is optional and, if omitted, defaults to the beginning of the file, t
 
 Here are some examples of how to use `slice`:
 
-```
+```sh
 slice 10:20 file.txt
 ```
 
 This command slices the contents of `file.txt` from line 10 to line 20.
 
-```
+```sh
 slice :100:2 file.txt
 ```
 
 This command slices the contents of `file.txt` from the beginning of the file to line 100, skipping every second line.
 
-```
+```sh
 slice 5:+10 file.txt
 ```
 This command is same as `slice 5:15 file.txt`.
