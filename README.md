@@ -13,8 +13,7 @@ Slice is a command-line tool written in Rust that allows you to slice the conten
 ### Via Homebrew
 
 ```sh
-brew tap chantsune/tap
-brew install slice
+brew install chantsune/tap/slice
 ```
 
 ### Via Nix
