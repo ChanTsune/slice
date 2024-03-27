@@ -47,7 +47,7 @@ impl<'d, B: BufRead> Iterator for Delimited<'d, B> {
             let mut buf = [0; 1];
             match self.buf.read(&mut buf) {
                 Ok(0) => None,
-                Ok(_) => Some(Ok(Vec::from(buf))),
+                Ok(_n) => Some(Ok(Vec::from(buf))),
                 Err(e) => Some(Err(e)),
             }
         }
