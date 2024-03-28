@@ -42,7 +42,7 @@ After building, add the binary to your PATH to use it globally.
 
 To use `slice`, run the following command:
 
-```
+```sh
 slice [options] <slice> <file...>
 ```
 
