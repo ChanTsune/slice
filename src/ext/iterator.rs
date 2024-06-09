@@ -4,18 +4,16 @@ use std::{
 };
 
 #[derive(Debug)]
-pub(crate) struct Slice<R> {
-    r: StepBy<Skip<Take<R>>>,
-}
+pub(crate) struct Slice<R>(StepBy<Skip<Take<R>>>);
 
 impl<R: Iterator> Slice<R> {
     #[inline]
     fn new(r: R, start: usize, end: usize, step: Option<NonZeroUsize>) -> Self {
-        Self {
-            r: r.take(end)
+        Self(
+            r.take(end)
                 .skip(start)
                 .step_by(step.map(|step| step.get()).unwrap_or(1)),
-        }
+        )
     }
 }
 
@@ -23,7 +21,7 @@ impl<I: Iterator> Iterator for Slice<I> {
     type Item = <I as Iterator>::Item;
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.r.next()
+        self.0.next()
     }
 }
 
