@@ -1,3 +1,7 @@
+mod cli;
+mod ext;
+mod range;
+
 use crate::{
     ext::{BufReadExt, IteratorExt},
     range::SliceRange,
@@ -8,10 +12,6 @@ use std::{
     io::{self, stdin, stdout, BufRead, Read, Write},
     path::PathBuf,
 };
-
-mod cli;
-mod ext;
-mod range;
 
 #[inline]
 fn buf_reader<R: Read>(reader: R, capacity: Option<usize>) -> io::BufReader<R> {
