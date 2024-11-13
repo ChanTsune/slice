@@ -25,7 +25,7 @@ pub(crate) struct Delimited<'d, B> {
     delimiter: &'d [u8],
 }
 
-impl<'d, B: BufRead> Iterator for Delimited<'d, B> {
+impl<B: BufRead> Iterator for Delimited<'_, B> {
     type Item = io::Result<Vec<u8>>;
 
     #[inline]
