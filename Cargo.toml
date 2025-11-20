@@ -14,7 +14,7 @@ rust-version = "1.74"
 
 [dependencies]
 bytesize = "2.2.0"
-clap = { version = "4.5.52", features = ["derive"] }
+clap = { version = "4.5.53", features = ["derive"] }
 
 [[bin]]
 name = "slice"
