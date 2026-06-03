@@ -41,7 +41,7 @@ impl FromStr for SliceRange {
             (start, parse_or(maybe_end, usize::MAX)?)
         };
         let step = match ptn.next() {
-            Some(step) => Some(parse_or(step, unsafe { NonZeroUsize::new_unchecked(1) })?),
+            Some(step) => Some(parse_or(step, NonZeroUsize::MIN)?),
             None => None,
         };
         Ok(Self { start, end, step })
@@ -146,6 +146,12 @@ mod tests {
                 step: NonZeroUsize::new(1),
             }
         );
+    }
+
+    #[test]
+    fn default_step_is_one() {
+        let slice = SliceRange::from_str("0:1:").expect("parse failed.");
+        assert_eq!(slice.step, Some(NonZeroUsize::MIN));
     }
 
     #[test]
