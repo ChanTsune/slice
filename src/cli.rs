@@ -40,7 +40,7 @@ e.g., '50:+50'"
     pub(crate) range: SliceRange,
     #[arg(short, help = "Slice the lines (default)")]
     pub(crate) lines: bool,
-    #[arg(short, help = "Slice the characters")]
+    #[arg(short, help = "Slice the bytes")]
     pub(crate) characters: bool,
     #[arg(long, help = "Slice by delimiter")]
     pub(crate) delimiter: Option<String>,
@@ -98,5 +98,17 @@ mod tests {
             }
         );
         assert_eq!(args.files, vec![PathBuf::from("text.txt")]);
+    }
+
+    #[test]
+    fn characters_help_mentions_bytes() {
+        use clap::CommandFactory;
+        let cmd = Args::command();
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_id().as_str() == "characters")
+            .expect("characters arg");
+        let help = arg.get_help().expect("help text").to_string();
+        assert!(help.to_lowercase().contains("byte"));
     }
 }
