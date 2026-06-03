@@ -33,3 +33,22 @@ jobs:
         run: cargo test --locked --release
         env:
           RUST_BACKTRACE: 1
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Resolve MSRV from Cargo.toml
+        id: msrv
+        run: |
+          version=$(grep -m1 '^rust-version' Cargo.toml | sed -E 's/.*"(.+)".*/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/cache-cargo
+        with:
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - uses: ./.github/actions/setup-rust
+        with:
+          channel: ${{ steps.msrv.outputs.version }}
+      - name: run test
+        run: cargo test --locked
+        env:
+          RUST_BACKTRACE: 1
