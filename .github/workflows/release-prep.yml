@@ -1,0 +1,78 @@
+name: release-prep
+
+on:
+  workflow_dispatch:
+    inputs:
+      level:
+        description: "Version level"
+        required: true
+        type: choice
+        options: [major, minor, patch]
+        default: patch
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push version bump commit
+      pull-requests: write # create draft PR
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/cache-cargo
+        with:
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Install cargo-release
+        run: cargo install --locked cargo-release
+
+      - name: Build temp release config
+        id: prep
+        run: |
+          set -euo pipefail
+          CONFIG=/tmp/release-config.toml
+          printf 'pre-release-commit-message = "%s"\n' ':bookmark: Bump version to {{version}}' > "$CONFIG"
+          echo "config=$CONFIG" >> "$GITHUB_OUTPUT"
+
+      - name: Run cargo release (no tag/push/publish)
+        env:
+          CARGO_TERM_COLOR: always
+          INPUT_LEVEL: ${{ inputs.level }}
+          RELEASE_CONFIG: ${{ steps.prep.outputs.config }}
+        run: |
+          set -euo pipefail
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cargo release \
+            "$INPUT_LEVEL" \
+            --no-publish \
+            --no-push \
+            --no-tag \
+            --execute \
+            --no-confirm \
+            --config "$RELEASE_CONFIG"
+
+      - name: Get new version
+        id: version
+        run: |
+          set -euo pipefail
+          NEW_VERSION=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "slice-command") | .version')
+          echo "value=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create draft PR
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: release/${{ inputs.level }}-${{ steps.version.outputs.value }}
+          title: ":bookmark: Prepare release v${{ steps.version.outputs.value }}"
+          body: |
+            Release prep (${{ inputs.level }}).
+            - Version set to ${{ steps.version.outputs.value }}
+            - No tags, pushes, or publishes; cargo-release performed the version bump only.
+          draft: true
