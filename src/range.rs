@@ -27,16 +27,16 @@ impl FromStr for SliceRange {
         let maybe_start = ptn
             .next()
             .ok_or_else(|| "range start must be needed".to_owned())?;
-        let start = parse_or(maybe_start, 0)?;
+        let start: usize = parse_or(maybe_start, 0)?;
         let maybe_end = ptn
             .next()
             .ok_or_else(|| "range end must be needed".to_owned())?;
         let (start, end) = if let Some(maybe_lines) = maybe_end.strip_prefix("+-") {
             let lines = parse_or(maybe_lines, usize::MAX)?;
-            (start - lines, start + lines)
+            (start.saturating_sub(lines), start.saturating_add(lines))
         } else if let Some(maybe_lines) = maybe_end.strip_prefix('+') {
             let lines = parse_or(maybe_lines, usize::MAX)?;
-            (start, start + lines)
+            (start, start.saturating_add(lines))
         } else {
             (start, parse_or(maybe_end, usize::MAX)?)
         };
@@ -169,6 +169,45 @@ mod tests {
             SliceRange {
                 start: 90,
                 end: 110,
+                step: None,
+            }
+        )
+    }
+
+    #[test]
+    fn plus_minus_sign_saturates_start() {
+        let slice = SliceRange::from_str("5:+-10").expect("parse failed.");
+        assert_eq!(
+            slice,
+            SliceRange {
+                start: 0,
+                end: 15,
+                step: None,
+            }
+        )
+    }
+
+    #[test]
+    fn plus_sign_saturates_end() {
+        let slice = SliceRange::from_str("5:+").expect("parse failed.");
+        assert_eq!(
+            slice,
+            SliceRange {
+                start: 5,
+                end: usize::MAX,
+                step: None,
+            }
+        )
+    }
+
+    #[test]
+    fn plus_minus_sign_saturates_both_ends() {
+        let slice = SliceRange::from_str("5:+-").expect("parse failed.");
+        assert_eq!(
+            slice,
+            SliceRange {
+                start: 0,
+                end: usize::MAX,
                 step: None,
             }
         )
