@@ -17,6 +17,10 @@ Options:
           Slice the bytes
       --delimiter <DELIMITER>
           Slice by delimiter
+  -z, --null
+          Use NUL (/0) as the delimiter
+  -e, --escape
+          Interpret backslash escapes in --delimiter (/t /n /r /0 // /xHH)
   -q
           Suppresses printing of headers when multiple files are being examined
       --io-buffer-size <IO_BUFFER_SIZE>

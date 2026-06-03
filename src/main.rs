@@ -6,7 +6,7 @@ use crate::{
     ext::{BufReadExt, IteratorExt},
     range::SliceRange,
 };
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use std::{
     fs,
     io::{self, stdin, stdout, BufRead, Read, Write},
@@ -119,13 +119,19 @@ fn multi<
 
 fn entry(args: cli::Args) -> bool {
     let io_buffer_size = args.io_buffer_size();
+    let delimiter = match args.delimiter() {
+        Ok(delimiter) => delimiter,
+        Err(e) => cli::Args::command()
+            .error(clap::error::ErrorKind::ValueValidation, e)
+            .exit(),
+    };
     if args.files.is_empty() {
         let input = buf_reader(stdin().lock(), io_buffer_size);
         let output = buf_writer(stdout().lock(), io_buffer_size);
         let result = if args.characters {
             character_mode(input, output, &args.range)
-        } else if let Some(delimiter) = args.delimiter {
-            delimit_mode(input, output, delimiter.as_bytes(), &args.range)
+        } else if let Some(delimiter) = delimiter.as_deref() {
+            delimit_mode(input, output, delimiter, &args.range)
         } else {
             line_mode(input, output, &args.range)
         };
@@ -147,14 +153,14 @@ fn entry(args: cli::Args) -> bool {
                 print_header,
                 |input, output, range| character_mode(input, output, range),
             )
-        } else if let Some(delimiter) = args.delimiter {
+        } else if let Some(delimiter) = delimiter.as_deref() {
             multi(
                 &args.files,
                 output,
                 |input| buf_reader(input, io_buffer_size),
                 &args.range,
                 print_header,
-                |input, output, range| delimit_mode(input, output, delimiter.as_bytes(), range),
+                |input, output, range| delimit_mode(input, output, delimiter, range),
             )
         } else {
             multi(
