@@ -30,7 +30,9 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - name: Install cargo-release
-        run: cargo install --locked cargo-release
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-release
 
       - name: Build temp release config
         id: prep
