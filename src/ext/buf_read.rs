@@ -64,7 +64,7 @@ pub(crate) trait BufReadExt {
     }
 
     #[inline]
-    fn delimit_by(self, delimiter: &[u8]) -> Delimited<Self>
+    fn delimit_by(self, delimiter: &[u8]) -> Delimited<'_, Self>
     where
         Self: Sized,
     {
