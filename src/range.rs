@@ -4,6 +4,49 @@ use std::{
 };
 
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub(crate) struct SliceRanges(Vec<SliceRange>);
+
+impl SliceRanges {
+    #[inline]
+    pub(crate) fn as_slice(&self) -> &[SliceRange] {
+        &self.0
+    }
+
+    fn validate_stream_order(ranges: &[SliceRange]) -> Result<(), String> {
+        let mut consumed = 0;
+        for range in ranges {
+            if range.start < range.end && range.start < consumed {
+                return Err(
+                    "range list must be in streaming order; overlapping or backward output ranges require buffering"
+                        .to_owned(),
+                );
+            }
+            consumed = consumed.max(range.end);
+        }
+        Ok(())
+    }
+}
+
+impl FromStr for SliceRanges {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let ranges = s
+            .split(',')
+            .map(|range| {
+                if range.is_empty() {
+                    Err("empty range in comma-separated range list".to_owned())
+                } else {
+                    SliceRange::from_str(range)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::validate_stream_order(&ranges)?;
+        Ok(Self(ranges))
+    }
+}
+
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub(crate) struct SliceRange {
     pub(crate) start: usize,
     pub(crate) end: usize,
@@ -56,6 +99,67 @@ impl FromStr for SliceRange {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod ranges {
+        use super::*;
+
+        #[test]
+        fn single() {
+            let ranges = SliceRanges::from_str("0:1:1").expect("parse failed.");
+            assert_eq!(
+                ranges.as_slice(),
+                &[SliceRange {
+                    start: 0,
+                    end: 1,
+                    step: NonZeroUsize::new(1),
+                }]
+            );
+        }
+
+        #[test]
+        fn multiple() {
+            let ranges = SliceRanges::from_str("0:5,10:15").expect("parse failed.");
+            assert_eq!(
+                ranges.as_slice(),
+                &[
+                    SliceRange {
+                        start: 0,
+                        end: 5,
+                        step: None,
+                    },
+                    SliceRange {
+                        start: 10,
+                        end: 15,
+                        step: None,
+                    }
+                ]
+            );
+        }
+
+        #[test]
+        fn rejects_empty_part() {
+            assert!(SliceRanges::from_str("0:5,").is_err());
+            assert!(SliceRanges::from_str(",0:5").is_err());
+        }
+
+        #[test]
+        fn rejects_backward_output_range() {
+            let err = SliceRanges::from_str("10:15,0:5").expect_err("range list must fail");
+            assert!(err.contains("streaming order"));
+        }
+
+        #[test]
+        fn rejects_overlapping_output_range() {
+            let err = SliceRanges::from_str("0:5,3:7").expect_err("range list must fail");
+            assert!(err.contains("streaming order"));
+        }
+
+        #[test]
+        fn allows_empty_backward_range() {
+            let ranges = SliceRanges::from_str("10:15,0:0").expect("parse failed.");
+            assert_eq!(ranges.as_slice().len(), 2);
+        }
+    }
 
     #[test]
     fn basic() {
