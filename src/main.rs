@@ -33,12 +33,26 @@ fn buf_writer<W: Write>(writer: W, capacity: Option<usize>) -> io::BufWriter<W> 
 }
 
 #[inline]
-fn line_mode<R: BufRead, W: Write>(input: R, mut output: W, range: &SliceRange) -> io::Result<()> {
-    for line in input
-        .lines_with_eol()
-        .slice(range.start, range.end, range.step)
-    {
-        output.write_all(&line?)?;
+fn line_mode<R: BufRead, W: Write>(
+    input: R,
+    mut output: W,
+    range: &SliceRange,
+    exclude: bool,
+) -> io::Result<()> {
+    if exclude {
+        for line in input
+            .lines_with_eol()
+            .exclude_slice(range.start, range.end, range.step)
+        {
+            output.write_all(&line?)?;
+        }
+    } else {
+        for line in input
+            .lines_with_eol()
+            .slice(range.start, range.end, range.step)
+        {
+            output.write_all(&line?)?;
+        }
     }
     output.flush()
 }
@@ -49,12 +63,22 @@ fn delimit_mode<R: BufRead, W: Write>(
     mut output: W,
     delimiter: &[u8],
     range: &SliceRange,
+    exclude: bool,
 ) -> io::Result<()> {
-    for part in input
-        .delimit_by(delimiter)
-        .slice(range.start, range.end, range.step)
-    {
-        output.write_all(&part?)?;
+    if exclude {
+        for part in input
+            .delimit_by(delimiter)
+            .exclude_slice(range.start, range.end, range.step)
+        {
+            output.write_all(&part?)?;
+        }
+    } else {
+        for part in input
+            .delimit_by(delimiter)
+            .slice(range.start, range.end, range.step)
+        {
+            output.write_all(&part?)?;
+        }
     }
     output.flush()
 }
@@ -64,9 +88,19 @@ fn character_mode<R: BufRead, W: Write>(
     input: R,
     mut output: W,
     range: &SliceRange,
+    exclude: bool,
 ) -> io::Result<()> {
-    for byte in input.bytes().slice(range.start, range.end, range.step) {
-        output.write_all(&[byte?])?;
+    if exclude {
+        for byte in input
+            .bytes()
+            .exclude_slice(range.start, range.end, range.step)
+        {
+            output.write_all(&[byte?])?;
+        }
+    } else {
+        for byte in input.bytes().slice(range.start, range.end, range.step) {
+            output.write_all(&[byte?])?;
+        }
     }
     output.flush()
 }
@@ -80,12 +114,13 @@ fn multi<
     W: Write,
     R: BufRead,
     IW: Fn(fs::File) -> R,
-    F: Fn(R, &mut W, &SliceRange) -> io::Result<()>,
+    F: Fn(R, &mut W, &SliceRange, bool) -> io::Result<()>,
 >(
     targets: &[PathBuf],
     mut out: W,
     input_wrapper: IW,
     range: &SliceRange,
+    exclude: bool,
     print_header: bool,
     f: F,
 ) -> bool {
@@ -109,7 +144,7 @@ fn multi<
                 continue;
             }
         }
-        if let Err(err) = f(input_wrapper(file), &mut out, range) {
+        if let Err(err) = f(input_wrapper(file), &mut out, range, exclude) {
             report_error(target, &err);
             ok = false;
         }
@@ -123,11 +158,17 @@ fn entry(args: cli::Args) -> bool {
         let input = buf_reader(stdin().lock(), io_buffer_size);
         let output = buf_writer(stdout().lock(), io_buffer_size);
         let result = if args.characters {
-            character_mode(input, output, &args.range)
+            character_mode(input, output, &args.range, args.exclude)
         } else if let Some(delimiter) = args.delimiter {
-            delimit_mode(input, output, delimiter.as_bytes(), &args.range)
+            delimit_mode(
+                input,
+                output,
+                delimiter.as_bytes(),
+                &args.range,
+                args.exclude,
+            )
         } else {
-            line_mode(input, output, &args.range)
+            line_mode(input, output, &args.range, args.exclude)
         };
         if let Err(err) = result {
             eprintln!("slice: {err}");
@@ -144,8 +185,9 @@ fn entry(args: cli::Args) -> bool {
                 output,
                 |input| buf_reader(input, io_buffer_size),
                 &args.range,
+                args.exclude,
                 print_header,
-                |input, output, range| character_mode(input, output, range),
+                |input, output, range, exclude| character_mode(input, output, range, exclude),
             )
         } else if let Some(delimiter) = args.delimiter {
             multi(
@@ -153,8 +195,11 @@ fn entry(args: cli::Args) -> bool {
                 output,
                 |input| buf_reader(input, io_buffer_size),
                 &args.range,
+                args.exclude,
                 print_header,
-                |input, output, range| delimit_mode(input, output, delimiter.as_bytes(), range),
+                |input, output, range, exclude| {
+                    delimit_mode(input, output, delimiter.as_bytes(), range, exclude)
+                },
             )
         } else {
             multi(
@@ -162,8 +207,9 @@ fn entry(args: cli::Args) -> bool {
                 output,
                 |input| buf_reader(input, io_buffer_size),
                 &args.range,
+                args.exclude,
                 print_header,
-                |input, output, range| line_mode(input, output, range),
+                |input, output, range, exclude| line_mode(input, output, range, exclude),
             )
         }
     }
@@ -192,6 +238,7 @@ mod tests {
                 b"".as_slice(),
                 &mut out,
                 &SliceRange::from_str("::").unwrap(),
+                false,
             )
             .expect("");
 
@@ -208,6 +255,7 @@ mod tests {
                     b"slice command is simple string slicing command.\n".as_slice(),
                     &mut out,
                     &SliceRange::from_str("::").unwrap(),
+                    false,
                 )
                 .expect("");
 
@@ -221,6 +269,7 @@ mod tests {
                     b"slice command is simple string slicing command.\n".as_slice(),
                     &mut out,
                     &SliceRange::from_str("1:").unwrap(),
+                    false,
                 )
                 .expect("");
 
@@ -234,6 +283,7 @@ mod tests {
                     b"slice command is simple string slicing command.\n".as_slice(),
                     &mut out,
                     &SliceRange::from_str("2:").unwrap(),
+                    false,
                 )
                 .expect("");
 
@@ -247,6 +297,7 @@ mod tests {
                     b"slice command is simple string slicing command.\n".as_slice(),
                     &mut out,
                     &SliceRange::from_str(":0").unwrap(),
+                    false,
                 )
                 .expect("");
 
@@ -260,6 +311,7 @@ mod tests {
                     b"slice command is simple string slicing command.\n".as_slice(),
                     &mut out,
                     &SliceRange::from_str("::2").unwrap(),
+                    false,
                 )
                 .expect("");
 
@@ -278,8 +330,9 @@ mod tests {
                         .as_slice(),
                     &mut out,
                     &SliceRange::from_str("::").unwrap(),
+                    false,
                 )
-                    .expect("");
+                .expect("");
 
                 assert_eq!(
                     out,
@@ -295,8 +348,9 @@ mod tests {
                         .as_slice(),
                     &mut out,
                     &SliceRange::from_str("1:").unwrap(),
+                    false,
                 )
-                    .expect("");
+                .expect("");
 
                 assert_eq!(out, b"Like a python slice syntax.\n");
             }
@@ -309,8 +363,9 @@ mod tests {
                         .as_slice(),
                     &mut out,
                     &SliceRange::from_str(":1").unwrap(),
+                    false,
                 )
-                    .expect("");
+                .expect("");
 
                 assert_eq!(out, b"slice command is simple string slicing command.\n");
             }
@@ -323,8 +378,9 @@ mod tests {
                         .as_slice(),
                     &mut out,
                     &SliceRange::from_str("::2").unwrap(),
+                    false,
                 )
-                    .expect("");
+                .expect("");
 
                 assert_eq!(
                     out,
@@ -340,6 +396,7 @@ mod tests {
                         .as_slice(),
                     &mut out,
                     &SliceRange::from_str("::").unwrap(),
+                    false,
                 )
                 .expect("");
 
@@ -356,10 +413,39 @@ mod tests {
                     b"slice\xaabinary stream\nslice binary\xaastream".as_slice(),
                     &mut out,
                     &SliceRange::from_str("::").unwrap(),
+                    false,
                 )
                 .expect("");
 
                 assert_eq!(out, b"slice\xaabinary stream\nslice binary\xaastream");
+            }
+
+            #[test]
+            fn exclude_middle_lines() {
+                let mut out = Vec::new();
+                line_mode(
+                    b"0\n1\n2\n3\n4\n".as_slice(),
+                    &mut out,
+                    &SliceRange::from_str("1:4").unwrap(),
+                    true,
+                )
+                .expect("");
+
+                assert_eq!(out, b"0\n4\n");
+            }
+
+            #[test]
+            fn exclude_respects_step() {
+                let mut out = Vec::new();
+                line_mode(
+                    b"0\n1\n2\n3\n4\n".as_slice(),
+                    &mut out,
+                    &SliceRange::from_str("1:5:2").unwrap(),
+                    true,
+                )
+                .expect("");
+
+                assert_eq!(out, b"0\n2\n4\n");
             }
         }
     }
@@ -374,6 +460,7 @@ mod tests {
                 b"".as_slice(),
                 &mut out,
                 &SliceRange::from_str("::").unwrap(),
+                false,
             )
             .expect("");
 
@@ -388,6 +475,7 @@ mod tests {
                     .as_slice(),
                 &mut out,
                 &SliceRange::from_str("::").unwrap(),
+                false,
             )
             .expect("");
 
@@ -405,6 +493,7 @@ mod tests {
                     .as_slice(),
                 &mut out,
                 &SliceRange::from_str("10:").unwrap(),
+                false,
             )
             .expect("");
 
@@ -422,6 +511,7 @@ mod tests {
                     .as_slice(),
                 &mut out,
                 &SliceRange::from_str(":15").unwrap(),
+                false,
             )
             .expect("");
 
@@ -436,6 +526,7 @@ mod tests {
                     .as_slice(),
                 &mut out,
                 &SliceRange::from_str("5:15").unwrap(),
+                false,
             )
             .expect("");
 
@@ -450,10 +541,73 @@ mod tests {
                     .as_slice(),
                 &mut out,
                 &SliceRange::from_str("::2").unwrap(),
+                false,
             )
             .expect("");
 
             assert_eq!(out, b"siecmadi ipesrn lcn omn.Lk  yhnsiesna.");
+        }
+
+        #[test]
+        fn exclude_middle_bytes() {
+            let mut out = Vec::new();
+            character_mode(
+                b"abcdef".as_slice(),
+                &mut out,
+                &SliceRange::from_str("1:4").unwrap(),
+                true,
+            )
+            .expect("");
+
+            assert_eq!(out, b"aef");
+        }
+
+        #[test]
+        fn exclude_preserves_non_utf8_bytes() {
+            let mut out = Vec::new();
+            character_mode(
+                b"a\xffb\xfec".as_slice(),
+                &mut out,
+                &SliceRange::from_str("1:4:2").unwrap(),
+                true,
+            )
+            .expect("");
+
+            assert_eq!(out, b"abc");
+        }
+    }
+
+    mod delimiter {
+        use super::*;
+
+        #[test]
+        fn exclude_delimited_parts() {
+            let mut out = Vec::new();
+            delimit_mode(
+                b"a|b|c|d|".as_slice(),
+                &mut out,
+                b"|",
+                &SliceRange::from_str("1:3").unwrap(),
+                true,
+            )
+            .expect("");
+
+            assert_eq!(out, b"a|d|");
+        }
+
+        #[test]
+        fn exclude_empty_delimiter_uses_byte_chunks() {
+            let mut out = Vec::new();
+            delimit_mode(
+                b"abcdef".as_slice(),
+                &mut out,
+                b"",
+                &SliceRange::from_str("2:5:2").unwrap(),
+                true,
+            )
+            .expect("");
+
+            assert_eq!(out, b"abdf");
         }
     }
 }

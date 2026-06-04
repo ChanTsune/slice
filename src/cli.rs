@@ -45,6 +45,11 @@ e.g., '50:+50'"
     #[arg(long, help = "Slice by delimiter")]
     pub(crate) delimiter: Option<String>,
     #[arg(
+        long,
+        help = "Exclude the selected slice and output the remaining input"
+    )]
+    pub(crate) exclude: bool,
+    #[arg(
         short,
         help = "Suppresses printing of headers when multiple files are being examined"
     )]
@@ -110,5 +115,33 @@ mod tests {
             .expect("characters arg");
         let help = arg.get_help().expect("help text").to_string();
         assert!(help.to_lowercase().contains("byte"));
+    }
+
+    #[test]
+    fn exclude_args() {
+        let args = Args::parse_from(["slice", "--exclude", "1:3", "text.txt"]);
+
+        assert!(args.exclude);
+        assert_eq!(
+            args.range,
+            SliceRange {
+                start: 1,
+                end: 3,
+                step: None,
+            }
+        );
+        assert_eq!(args.files, vec![PathBuf::from("text.txt")]);
+    }
+
+    #[test]
+    fn exclude_help_mentions_remaining_input() {
+        use clap::CommandFactory;
+        let cmd = Args::command();
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_id().as_str() == "exclude")
+            .expect("exclude arg");
+        let help = arg.get_help().expect("help text").to_string();
+        assert!(help.to_lowercase().contains("remaining"));
     }
 }
