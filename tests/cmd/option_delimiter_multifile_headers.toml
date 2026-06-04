@@ -1,0 +1,3 @@
+bin.name = "slice"
+args = ["--delimiter", ",", "0:2", "d.txt", "e.txt"]
+status.code = 0

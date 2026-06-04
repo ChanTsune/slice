@@ -1,0 +1,3 @@
+bin.name = "slice"
+args = ["--bogus", "::"]
+status.code = 2

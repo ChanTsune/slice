@@ -1,0 +1,27 @@
+slice is a command-line tool that allows you to slice the contents of a file using syntax similar to Python's slice notation.
+
+Usage: slice[EXE] [OPTIONS] <RANGE> [FILES]...
+
+Arguments:
+  <RANGE>     The slice syntax is similar to Python's slice syntax, with the format `start:end:step`.
+              Each value is optional and, if omitted, defaults to the start of the file, the end of the file, and a step of 1, respectively.
+              e.g., '50:100', '50:100:1'
+              and the extended syntax 'start:+line' is supported. (experimental)
+              e.g., '50:+50'
+  [FILES]...  Target files. if not provided use stdin
+
+Options:
+  -l
+          Slice the lines (default)
+  -c
+          Slice the bytes
+      --delimiter <DELIMITER>
+          Slice by delimiter
+  -q
+          Suppresses printing of headers when multiple files are being examined
+      --io-buffer-size <IO_BUFFER_SIZE>
+          Set the size of the I/O buffer. This buffer is used for both input and output operations (experimental)
+  -h, --help
+          Print help
+  -V, --version
+          Print version

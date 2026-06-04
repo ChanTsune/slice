@@ -1,0 +1,3 @@
+bin.name = "slice"
+args = ["-q", "-c", "0:3", "a.txt", "b.txt"]
+status.code = 0

@@ -1,0 +1,3 @@
+bin.name = "slice"
+args = ["--io-buffer-size", "1B", "1:3"]
+status.code = 0
