@@ -28,9 +28,9 @@ impl FromStr for SliceRange {
             .next()
             .ok_or_else(|| "range start must be needed".to_owned())?;
         let start: usize = parse_or(maybe_start, 0)?;
-        let maybe_end = ptn
-            .next()
-            .ok_or_else(|| "range end must be needed".to_owned())?;
+        let maybe_end = ptn.next().ok_or_else(|| {
+            "range requires a ':' separator (e.g. '3:4', '3:', or ':3')".to_owned()
+        })?;
         let (start, end) = if let Some(maybe_lines) = maybe_end.strip_prefix("+-") {
             let lines = parse_or(maybe_lines, usize::MAX)?;
             (start.saturating_sub(lines), start.saturating_add(lines))
@@ -44,6 +44,11 @@ impl FromStr for SliceRange {
             Some(step) => Some(parse_or(step, NonZeroUsize::MIN)?),
             None => None,
         };
+        if ptn.next().is_some() {
+            return Err(
+                "too many ':' separators in range (expected at most start:end:step)".to_owned(),
+            );
+        }
         Ok(Self { start, end, step })
     }
 }
@@ -242,6 +247,22 @@ mod tests {
         #[test]
         fn non_integer_step() {
             assert!(SliceRange::from_str("1:1:b").is_err());
+        }
+
+        #[test]
+        fn missing_colon() {
+            let err = SliceRange::from_str("3").expect_err("bare number must be rejected");
+            assert_eq!(
+                err,
+                "range requires a ':' separator (e.g. '3:4', '3:', or ':3')"
+            );
+        }
+
+        #[test]
+        fn too_many_parts() {
+            assert!(SliceRange::from_str("1:2:3:4").is_err());
+            assert!(SliceRange::from_str("1:2:3:4:5").is_err());
+            assert!(SliceRange::from_str(":::").is_err());
         }
     }
 }
