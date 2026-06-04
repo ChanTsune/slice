@@ -19,3 +19,6 @@ clap = { version = "4.6.1", features = ["derive"] }
 [[bin]]
 name = "slice"
 path = "src/main.rs"
+
+[dev-dependencies]
+trycmd = "1.1"
