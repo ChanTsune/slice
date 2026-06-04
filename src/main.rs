@@ -10,7 +10,8 @@ use clap::Parser;
 use std::{
     fs,
     io::{self, stdin, stdout, BufRead, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
+    process::ExitCode,
 };
 
 #[inline]
@@ -70,6 +71,10 @@ fn character_mode<R: BufRead, W: Write>(
     output.flush()
 }
 
+fn report_error(path: &Path, err: &io::Error) {
+    eprintln!("slice: {}: {}", path.display(), err);
+}
+
 #[inline]
 fn multi<
     W: Write,
@@ -83,40 +88,55 @@ fn multi<
     range: &SliceRange,
     print_header: bool,
     f: F,
-) -> io::Result<()> {
+) -> bool {
+    let mut ok = true;
     for target in targets {
+        // Open before printing the header so an unopenable file gets an error
+        // on stderr instead of a header, and the remaining files are still
+        // processed (same convention as head(1)/tail(1)).
+        let file = match fs::File::open(target) {
+            Ok(file) => file,
+            Err(err) => {
+                report_error(target, &err);
+                ok = false;
+                continue;
+            }
+        };
         if print_header {
-            writeln!(out, "==> {} <==", target.display())?;
+            if let Err(err) = writeln!(out, "==> {} <==", target.display()) {
+                report_error(target, &err);
+                ok = false;
+                continue;
+            }
         }
-        let reader = input_wrapper(fs::File::open(target)?);
-        f(reader, &mut out, range)?;
+        if let Err(err) = f(input_wrapper(file), &mut out, range) {
+            report_error(target, &err);
+            ok = false;
+        }
     }
-    Ok(())
+    ok
 }
 
-fn entry(args: cli::Args) -> io::Result<()> {
+fn entry(args: cli::Args) -> bool {
+    let io_buffer_size = args.io_buffer_size();
     if args.files.is_empty() {
-        let input = buf_reader(stdin().lock(), args.io_buffer_size());
-        let output = buf_writer(stdout().lock(), args.io_buffer_size());
-        if args.characters {
+        let input = buf_reader(stdin().lock(), io_buffer_size);
+        let output = buf_writer(stdout().lock(), io_buffer_size);
+        let result = if args.characters {
             character_mode(input, output, &args.range)
         } else if let Some(delimiter) = args.delimiter {
             delimit_mode(input, output, delimiter.as_bytes(), &args.range)
         } else {
             line_mode(input, output, &args.range)
+        };
+        if let Err(err) = result {
+            eprintln!("slice: {err}");
+            return false;
         }
-    } else if args.files.len() == 1 {
-        let input = buf_reader(fs::File::open(&args.files[0])?, args.io_buffer_size());
-        let output = buf_writer(stdout().lock(), args.io_buffer_size());
-        if args.characters {
-            character_mode(input, output, &args.range)
-        } else if let Some(delimiter) = args.delimiter {
-            delimit_mode(input, output, delimiter.as_bytes(), &args.range)
-        } else {
-            line_mode(input, output, &args.range)
-        }
+        true
     } else {
-        let io_buffer_size = args.io_buffer_size();
+        // A single file never gets a header, so -q only matters for 2+ files.
+        let print_header = args.files.len() > 1 && !args.quiet_headers;
         let output = buf_writer(stdout().lock(), io_buffer_size);
         if args.characters {
             multi(
@@ -124,7 +144,7 @@ fn entry(args: cli::Args) -> io::Result<()> {
                 output,
                 |input| buf_reader(input, io_buffer_size),
                 &args.range,
-                !args.quiet_headers,
+                print_header,
                 |input, output, range| character_mode(input, output, range),
             )
         } else if let Some(delimiter) = args.delimiter {
@@ -133,7 +153,7 @@ fn entry(args: cli::Args) -> io::Result<()> {
                 output,
                 |input| buf_reader(input, io_buffer_size),
                 &args.range,
-                !args.quiet_headers,
+                print_header,
                 |input, output, range| delimit_mode(input, output, delimiter.as_bytes(), range),
             )
         } else {
@@ -142,15 +162,19 @@ fn entry(args: cli::Args) -> io::Result<()> {
                 output,
                 |input| buf_reader(input, io_buffer_size),
                 &args.range,
-                !args.quiet_headers,
+                print_header,
                 |input, output, range| line_mode(input, output, range),
             )
         }
     }
 }
 
-fn main() -> io::Result<()> {
-    entry(cli::Args::parse())
+fn main() -> ExitCode {
+    if entry(cli::Args::parse()) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 #[cfg(test)]
