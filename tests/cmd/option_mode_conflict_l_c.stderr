@@ -1,0 +1,5 @@
+error: the argument '-l' cannot be used with '-c'
+
+Usage: slice[EXE] -l <RANGE> [FILES]...
+
+For more information, try '--help'.

@@ -1,0 +1,7 @@
+error: unexpected argument '--bogus' found
+
+  tip: to pass '--bogus' as a value, use '-- --bogus'
+
+Usage: slice[EXE] [OPTIONS] <RANGE> [FILES]...
+
+For more information, try '--help'.
