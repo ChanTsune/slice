@@ -87,6 +87,32 @@ docker build -t slice .
 docker run -v `pwd`:`pwd` -w `pwd` --rm -i slice
 ```
 
+## Development
+
+### Tests
+
+Run the unit tests and the end-to-end CLI tests together:
+
+```sh
+cargo test
+```
+
+CLI behavior is locked under `tests/cmd/` via [`trycmd`]: each `*.toml` case runs the built
+`slice` binary and compares its stdout, stderr, and exit code against sibling golden files.
+
+After an intentional behavior change, regenerate the expected outputs and review the diff:
+
+```sh
+TRYCMD=overwrite cargo test --test cli   # update existing golden files in place
+```
+
+When adding a brand-new case, write its `*.toml` (plus `*.stdin` and/or `*.in/`), capture the
+actual output with `TRYCMD=dump cargo test --test cli`, and copy `dump/<name>.stdout` /
+`dump/<name>.stderr` into `tests/cmd/`. Keep OS-specific lines redacted with `[..]` (currently the
+I/O-error message and the `--version` string).
+
+[`trycmd`]: https://docs.rs/trycmd
+
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
