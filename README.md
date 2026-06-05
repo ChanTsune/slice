@@ -89,6 +89,11 @@ docker run -v `pwd`:`pwd` -w `pwd` --rm -i slice
 
 ## Development
 
+### Dev Container
+
+Open the repository in a [Dev Container](https://containers.dev/) (VS Code "Reopen in Container" or GitHub Codespaces) to get a ready-to-use environment.
+The container installs the toolchain declared in `flake.nix` via Nix and activates it automatically with [direnv](https://direnv.net/), so `cargo test` works out of the box.
+
 ### Tests
 
 Run the unit tests and the end-to-end CLI tests together:
