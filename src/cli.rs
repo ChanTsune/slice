@@ -47,6 +47,13 @@ e.g., '50:+50'"
     #[arg(short = 'z', long = "null", help = "Use NUL (\\0) as the delimiter")]
     pub(crate) null: bool,
     #[arg(
+        short = 'e',
+        long = "escape",
+        requires = "delimiter",
+        help = "Interpret backslash escapes in --delimiter (\\t \\n \\r \\0 \\\\ \\xHH)"
+    )]
+    pub(crate) escape: bool,
+    #[arg(
         short,
         help = "Suppresses printing of headers when multiple files are being examined"
     )]
@@ -67,13 +74,75 @@ impl Args {
     }
 
     /// Resolve the effective delimiter bytes. `--null` yields a single NUL
-    /// byte; otherwise `--delimiter` is used verbatim.
-    pub(crate) fn delimiter(&self) -> Option<Vec<u8>> {
+    /// byte; otherwise `--delimiter` is taken literally unless `--escape` is
+    /// set, in which case backslash escapes are expanded.
+    pub(crate) fn delimiter(&self) -> Result<Option<Vec<u8>>, String> {
         if self.null {
-            return Some(vec![0]);
+            return Ok(Some(vec![0]));
         }
-        self.delimiter.as_ref().map(|s| s.clone().into_bytes())
+        match &self.delimiter {
+            Some(s) if self.escape => unescape(s).map(Some),
+            Some(s) => Ok(Some(s.clone().into_bytes())),
+            None => Ok(None),
+        }
     }
+}
+
+#[inline]
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Expand C-style backslash escapes (`\t \n \r \0 \\ \xHH`) into raw bytes.
+/// Non-escaped bytes pass through unchanged, so UTF-8 delimiters are preserved.
+fn unescape(s: &str) -> Result<Vec<u8>, String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b != b'\\' {
+            out.push(b);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        let Some(&esc) = bytes.get(i) else {
+            return Err("trailing backslash in delimiter".to_owned());
+        };
+        match esc {
+            b'n' => out.push(b'\n'),
+            b'r' => out.push(b'\r'),
+            b't' => out.push(b'\t'),
+            b'0' => out.push(0),
+            b'\\' => out.push(b'\\'),
+            b'x' => {
+                let (hi, lo) = match (bytes.get(i + 1), bytes.get(i + 2)) {
+                    (Some(&hi), Some(&lo)) => (hi, lo),
+                    _ => return Err("`\\x` needs two hex digits".to_owned()),
+                };
+                let byte = hex_val(hi).zip(hex_val(lo)).map(|(h, l)| h << 4 | l);
+                match byte {
+                    Some(byte) => out.push(byte),
+                    None => {
+                        return Err(format!(
+                            "invalid hex escape `\\x{}{}`",
+                            hi as char, lo as char
+                        ))
+                    }
+                }
+                i += 2;
+            }
+            other => return Err(format!("unknown escape sequence `\\{}`", other as char)),
+        }
+        i += 1;
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -126,19 +195,57 @@ mod tests {
     #[test]
     fn delimiter_null() {
         let args = Args::parse_from(["slice", "-z", "0:"]);
-        assert_eq!(args.delimiter(), Some(vec![0]));
+        assert_eq!(args.delimiter().unwrap(), Some(vec![0]));
     }
 
     #[test]
     fn delimiter_passthrough() {
         let args = Args::parse_from(["slice", "--delimiter", ",", "0:"]);
-        assert_eq!(args.delimiter(), Some(b",".to_vec()));
+        assert_eq!(args.delimiter().unwrap(), Some(b",".to_vec()));
+    }
+
+    #[test]
+    fn unescape_basic() {
+        assert_eq!(unescape("\\t").unwrap(), b"\t");
+        assert_eq!(unescape("\\n").unwrap(), b"\n");
+        assert_eq!(unescape("\\r\\n").unwrap(), b"\r\n");
+        assert_eq!(unescape("\\0").unwrap(), [0]);
+        assert_eq!(unescape("\\\\").unwrap(), b"\\");
+        assert_eq!(unescape(",").unwrap(), b",");
+        assert_eq!(unescape("a\\tb").unwrap(), b"a\tb");
+    }
+
+    #[test]
+    fn unescape_hex() {
+        assert_eq!(unescape("\\x41").unwrap(), [0x41]);
+        assert_eq!(unescape("\\xff").unwrap(), [0xff]);
+        assert_eq!(unescape("\\x00\\x01").unwrap(), [0x00, 0x01]);
+    }
+
+    #[test]
+    fn unescape_errors() {
+        assert!(unescape("\\q").is_err());
+        assert!(unescape("trailing\\").is_err());
+        assert!(unescape("\\x").is_err());
+        assert!(unescape("\\xZZ").is_err());
+    }
+
+    #[test]
+    fn delimiter_literal_by_default() {
+        let args = Args::parse_from(["slice", "--delimiter", "\\t", "0:"]);
+        assert_eq!(args.delimiter().unwrap(), Some(b"\\t".to_vec()));
+    }
+
+    #[test]
+    fn delimiter_escaped_with_flag() {
+        let args = Args::parse_from(["slice", "--delimiter", "\\t", "-e", "0:"]);
+        assert_eq!(args.delimiter().unwrap(), Some(b"\t".to_vec()));
     }
 
     #[test]
     fn delimiter_none() {
         let args = Args::parse_from(["slice", "0:"]);
-        assert_eq!(args.delimiter(), None);
+        assert_eq!(args.delimiter().unwrap(), None);
     }
 
     #[test]
@@ -146,5 +253,10 @@ mod tests {
         assert!(Args::try_parse_from(["slice", "-z", "-c", "0:"]).is_err());
         assert!(Args::try_parse_from(["slice", "-z", "--delimiter", ",", "0:"]).is_err());
         assert!(Args::try_parse_from(["slice", "-c", "--delimiter", ",", "0:"]).is_err());
+    }
+
+    #[test]
+    fn escape_requires_delimiter() {
+        assert!(Args::try_parse_from(["slice", "-e", "0:"]).is_err());
     }
 }

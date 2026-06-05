@@ -6,7 +6,7 @@ use crate::{
     ext::{BufReadExt, IteratorExt},
     range::SliceRange,
 };
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use std::{
     fs,
     io::{self, stdin, stdout, BufRead, Read, Write},
@@ -119,7 +119,12 @@ fn multi<
 
 fn entry(args: cli::Args) -> bool {
     let io_buffer_size = args.io_buffer_size();
-    let delimiter = args.delimiter();
+    let delimiter = match args.delimiter() {
+        Ok(delimiter) => delimiter,
+        Err(e) => cli::Args::command()
+            .error(clap::error::ErrorKind::ValueValidation, e)
+            .exit(),
+    };
     if args.files.is_empty() {
         let input = buf_reader(stdin().lock(), io_buffer_size);
         let output = buf_writer(stdout().lock(), io_buffer_size);

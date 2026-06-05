@@ -1,0 +1,5 @@
+error: unknown escape sequence `/q`
+
+Usage: slice [OPTIONS] <RANGE> [FILES]...
+
+For more information, try '--help'.
