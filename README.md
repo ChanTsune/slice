@@ -81,6 +81,15 @@ find . -type f -print0 | slice 0:100 -z
 With `-z` (`--null`), records are split on NUL (`\0`) instead of newlines, so it
 interoperates with `find -print0`, `xargs -0`, and `grep -z`.
 
+```sh
+slice 0:3 --delimiter '\t' -e data.tsv
+```
+
+By default `--delimiter` is taken literally. Add `-e` (`--escape`) to interpret
+backslash escapes in the delimiter: `\t`, `\n`, `\r`, `\0`, `\\`, and `\xHH`
+(an arbitrary byte, e.g. `\xff`). This command slices the first three
+tab-separated fields.
+
 For more details, run:
 
 ```sh
