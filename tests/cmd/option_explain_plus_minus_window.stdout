@@ -1,0 +1,6 @@
+start: 90
+end:   110 (exclusive)
+step:  1
+0-based: lines at indices [90, 110)
+1-based: from the 91st line to the 110th line
+count: 20

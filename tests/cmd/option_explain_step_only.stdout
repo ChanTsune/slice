@@ -1,0 +1,6 @@
+start: 0
+end:   end of input
+step:  2
+0-based: lines at indices [0, end of input), every 2 starting at 0
+1-based: every 2nd line from the 1st line to the last line
+count: until end of input (step 2)

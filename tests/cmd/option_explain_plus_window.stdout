@@ -1,0 +1,6 @@
+start: 5
+end:   15 (exclusive)
+step:  1
+0-based: lines at indices [5, 15)
+1-based: from the 6th line to the 15th line
+count: 10

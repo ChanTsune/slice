@@ -55,6 +55,11 @@ e.g., '50:+50'"
     )]
     pub(crate) escape: bool,
     #[arg(
+        long,
+        help = "Explain what the range selects and exit without reading input. Any FILES are ignored"
+    )]
+    pub(crate) explain: bool,
+    #[arg(
         short,
         help = "Suppresses printing of headers when multiple files are being examined"
     )]
@@ -200,6 +205,32 @@ mod tests {
             }
         );
         assert_eq!(args.files, vec![PathBuf::from("text.txt")]);
+    }
+
+    #[test]
+    fn explain_flag_parses() {
+        let args = Args::parse_from(["slice", "--explain", "10:20"]);
+        assert!(args.explain);
+        assert_eq!(
+            args.range,
+            SliceRange {
+                start: 10,
+                end: 20,
+                step: None,
+            }
+        );
+    }
+
+    #[test]
+    fn explain_help_mentions_without_reading_input() {
+        use clap::CommandFactory;
+        let cmd = Args::command();
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_id().as_str() == "explain")
+            .expect("explain arg");
+        let help = arg.get_help().expect("help text").to_string();
+        assert!(help.to_lowercase().contains("without reading input"));
     }
 
     #[test]
