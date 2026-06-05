@@ -1,0 +1,5 @@
+error: the argument '--null' cannot be used with '--delimiter <DELIMITER>'
+
+Usage: slice[EXE] --null <RANGE> [FILES]...
+
+For more information, try '--help'.

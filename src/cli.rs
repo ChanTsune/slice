@@ -27,7 +27,7 @@ impl FromStr for NonZeroByteSize {
     about,
     author,
     arg_required_else_help = true,
-    group(ArgGroup::new("mode").args(["lines", "characters"])),
+    group(ArgGroup::new("mode").args(["lines", "characters", "delimiter", "null"])),
 )]
 pub(crate) struct Args {
     #[arg(
@@ -44,6 +44,8 @@ e.g., '50:+50'"
     pub(crate) characters: bool,
     #[arg(long, help = "Slice by delimiter")]
     pub(crate) delimiter: Option<String>,
+    #[arg(short = 'z', long = "null", help = "Use NUL (\\0) as the delimiter")]
+    pub(crate) null: bool,
     #[arg(
         short,
         help = "Suppresses printing of headers when multiple files are being examined"
@@ -62,6 +64,15 @@ impl Args {
     #[inline]
     pub(crate) fn io_buffer_size(&self) -> Option<usize> {
         self.io_buffer_size.map(|it| it.0.as_u64() as usize)
+    }
+
+    /// Resolve the effective delimiter bytes. `--null` yields a single NUL
+    /// byte; otherwise `--delimiter` is used verbatim.
+    pub(crate) fn delimiter(&self) -> Option<Vec<u8>> {
+        if self.null {
+            return Some(vec![0]);
+        }
+        self.delimiter.as_ref().map(|s| s.clone().into_bytes())
     }
 }
 
@@ -110,5 +121,30 @@ mod tests {
             .expect("characters arg");
         let help = arg.get_help().expect("help text").to_string();
         assert!(help.to_lowercase().contains("byte"));
+    }
+
+    #[test]
+    fn delimiter_null() {
+        let args = Args::parse_from(["slice", "-z", "0:"]);
+        assert_eq!(args.delimiter(), Some(vec![0]));
+    }
+
+    #[test]
+    fn delimiter_passthrough() {
+        let args = Args::parse_from(["slice", "--delimiter", ",", "0:"]);
+        assert_eq!(args.delimiter(), Some(b",".to_vec()));
+    }
+
+    #[test]
+    fn delimiter_none() {
+        let args = Args::parse_from(["slice", "0:"]);
+        assert_eq!(args.delimiter(), None);
+    }
+
+    #[test]
+    fn mode_flags_are_mutually_exclusive() {
+        assert!(Args::try_parse_from(["slice", "-z", "-c", "0:"]).is_err());
+        assert!(Args::try_parse_from(["slice", "-z", "--delimiter", ",", "0:"]).is_err());
+        assert!(Args::try_parse_from(["slice", "-c", "--delimiter", ",", "0:"]).is_err());
     }
 }
