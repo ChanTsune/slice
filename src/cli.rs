@@ -27,7 +27,7 @@ impl FromStr for NonZeroByteSize {
     about,
     author,
     arg_required_else_help = true,
-    group(ArgGroup::new("mode").args(["lines", "characters", "delimiter", "null"])),
+    group(ArgGroup::new("mode").args(["lines", "bytes", "delimiter", "null"])),
 )]
 pub(crate) struct Args {
     #[arg(
@@ -40,8 +40,9 @@ e.g., '50:+50'"
     pub(crate) range: SliceRange,
     #[arg(short, help = "Slice the lines (default)")]
     pub(crate) lines: bool,
-    #[arg(short, help = "Slice the bytes")]
-    pub(crate) characters: bool,
+    // `-c` is a hidden short alias kept for backward compatibility.
+    #[arg(short, long, short_alias = 'c', help = "Slice the bytes")]
+    pub(crate) bytes: bool,
     #[arg(long, help = "Slice by delimiter")]
     pub(crate) delimiter: Option<String>,
     #[arg(short = 'z', long = "null", help = "Use NUL (\\0) as the delimiter")]
@@ -166,9 +167,9 @@ mod tests {
     }
 
     #[test]
-    fn character_mode_args() {
-        let args = Args::parse_from(["slice", "-c", "0::1", "text.txt"]);
-        assert!(args.characters);
+    fn byte_mode_args() {
+        let args = Args::parse_from(["slice", "-b", "0::1", "text.txt"]);
+        assert!(args.bytes);
         assert_eq!(
             args.range,
             SliceRange {
@@ -181,13 +182,34 @@ mod tests {
     }
 
     #[test]
-    fn characters_help_mentions_bytes() {
+    fn long_bytes_flag_args() {
+        let args = Args::parse_from(["slice", "--bytes", "0::1", "text.txt"]);
+        assert!(args.bytes);
+    }
+
+    #[test]
+    fn c_short_alias_sets_bytes() {
+        let args = Args::parse_from(["slice", "-c", "0::1", "text.txt"]);
+        assert!(args.bytes);
+        assert_eq!(
+            args.range,
+            SliceRange {
+                start: 0,
+                end: usize::MAX,
+                step: NonZeroUsize::new(1),
+            }
+        );
+        assert_eq!(args.files, vec![PathBuf::from("text.txt")]);
+    }
+
+    #[test]
+    fn bytes_help_mentions_bytes() {
         use clap::CommandFactory;
         let cmd = Args::command();
         let arg = cmd
             .get_arguments()
-            .find(|a| a.get_id().as_str() == "characters")
-            .expect("characters arg");
+            .find(|a| a.get_id().as_str() == "bytes")
+            .expect("bytes arg");
         let help = arg.get_help().expect("help text").to_string();
         assert!(help.to_lowercase().contains("byte"));
     }
@@ -250,9 +272,9 @@ mod tests {
 
     #[test]
     fn mode_flags_are_mutually_exclusive() {
-        assert!(Args::try_parse_from(["slice", "-z", "-c", "0:"]).is_err());
+        assert!(Args::try_parse_from(["slice", "-z", "-b", "0:"]).is_err());
         assert!(Args::try_parse_from(["slice", "-z", "--delimiter", ",", "0:"]).is_err());
-        assert!(Args::try_parse_from(["slice", "-c", "--delimiter", ",", "0:"]).is_err());
+        assert!(Args::try_parse_from(["slice", "-b", "--delimiter", ",", "0:"]).is_err());
     }
 
     #[test]

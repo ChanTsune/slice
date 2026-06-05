@@ -62,11 +62,7 @@ fn delimit_mode<R: BufRead, W: Write>(
 }
 
 #[inline]
-fn character_mode<R: BufRead, W: Write>(
-    input: R,
-    mut output: W,
-    range: &SliceRange,
-) -> io::Result<()> {
+fn byte_mode<R: BufRead, W: Write>(input: R, mut output: W, range: &SliceRange) -> io::Result<()> {
     for byte in input.bytes().slice(range.start, range.end, range.step) {
         output.write_all(&[byte?])?;
     }
@@ -130,8 +126,8 @@ fn entry(args: cli::Args) -> bool {
     if args.files.is_empty() {
         let input = buf_reader(stdin().lock(), io_buffer_size);
         let output = buf_writer(stdout().lock(), io_buffer_size);
-        let result = if args.characters {
-            character_mode(input, output, &args.range)
+        let result = if args.bytes {
+            byte_mode(input, output, &args.range)
         } else if let Some(delimiter) = delimiter.as_deref() {
             delimit_mode(input, output, delimiter, &args.range)
         } else {
@@ -146,14 +142,14 @@ fn entry(args: cli::Args) -> bool {
         // A single file never gets a header, so -q only matters for 2+ files.
         let print_header = args.files.len() > 1 && !args.quiet_headers;
         let output = buf_writer(stdout().lock(), io_buffer_size);
-        if args.characters {
+        if args.bytes {
             multi(
                 &args.files,
                 output,
                 |input| buf_reader(input, io_buffer_size),
                 &args.range,
                 print_header,
-                |input, output, range| character_mode(input, output, range),
+                |input, output, range| byte_mode(input, output, range),
             )
         } else if let Some(delimiter) = delimiter.as_deref() {
             multi(
@@ -372,13 +368,13 @@ mod tests {
         }
     }
 
-    mod character {
+    mod byte {
         use super::*;
 
         #[test]
         fn empty() {
             let mut out = Vec::new();
-            character_mode(
+            byte_mode(
                 b"".as_slice(),
                 &mut out,
                 &SliceRange::from_str("::").unwrap(),
@@ -391,7 +387,7 @@ mod tests {
         #[test]
         fn no_slice() {
             let mut out = Vec::new();
-            character_mode(
+            byte_mode(
                 b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
                     .as_slice(),
                 &mut out,
@@ -408,7 +404,7 @@ mod tests {
         #[test]
         fn skip_first() {
             let mut out = Vec::new();
-            character_mode(
+            byte_mode(
                 b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
                     .as_slice(),
                 &mut out,
@@ -425,7 +421,7 @@ mod tests {
         #[test]
         fn drop_last() {
             let mut out = Vec::new();
-            character_mode(
+            byte_mode(
                 b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
                     .as_slice(),
                 &mut out,
@@ -439,7 +435,7 @@ mod tests {
         #[test]
         fn skip_first_and_drop_last() {
             let mut out = Vec::new();
-            character_mode(
+            byte_mode(
                 b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
                     .as_slice(),
                 &mut out,
@@ -453,7 +449,7 @@ mod tests {
         #[test]
         fn skip_two_slice() {
             let mut out = Vec::new();
-            character_mode(
+            byte_mode(
                 b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
                     .as_slice(),
                 &mut out,
