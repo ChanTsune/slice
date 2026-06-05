@@ -1,0 +1,6 @@
+start: 10
+end:   20 (exclusive)
+step:  1
+0-based: lines at indices [10, 20)
+1-based: from the 11th line to the 20th line
+count: 10

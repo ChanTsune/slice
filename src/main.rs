@@ -123,6 +123,17 @@ fn entry(args: cli::Args) -> bool {
             .error(clap::error::ErrorKind::ValueValidation, e)
             .exit(),
     };
+    if args.explain {
+        let unit = if args.bytes {
+            "byte"
+        } else if delimiter.is_some() {
+            "part"
+        } else {
+            "line"
+        };
+        print!("{}", args.range.explain(unit));
+        return true;
+    }
     if args.files.is_empty() {
         let input = buf_reader(stdin().lock(), io_buffer_size);
         let output = buf_writer(stdout().lock(), io_buffer_size);

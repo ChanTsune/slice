@@ -1,0 +1,3 @@
+bin.name = "slice"
+args = ["--explain", "5:+10"]
+status.code = 0

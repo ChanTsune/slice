@@ -1,0 +1,6 @@
+start: 0
+end:   5 (exclusive)
+step:  1
+0-based: lines at indices [0, 5)
+1-based: from the 1st line to the 5th line
+count: 5
