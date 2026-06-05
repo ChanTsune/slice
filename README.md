@@ -74,6 +74,13 @@ slice 5:+10 file.txt
 
 This command is the same as `slice` 5:15 file.txt`.
 
+```sh
+find . -type f -print0 | slice 0:100 -z
+```
+
+With `-z` (`--null`), records are split on NUL (`\0`) instead of newlines, so it
+interoperates with `find -print0`, `xargs -0`, and `grep -z`.
+
 For more details, run:
 
 ```sh

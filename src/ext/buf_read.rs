@@ -142,4 +142,11 @@ mod tests {
         assert_eq!(b"a||", delimited.next().unwrap().unwrap().as_slice());
         assert_eq!(b"|b|", delimited.next().unwrap().unwrap().as_slice());
     }
+
+    #[test]
+    fn delimit_by_nul() {
+        let mut delimited = BufReader::new(&b"a\0b\0"[..]).delimit_by(&[0]);
+        assert_eq!(b"a\0", delimited.next().unwrap().unwrap().as_slice());
+        assert_eq!(b"b\0", delimited.next().unwrap().unwrap().as_slice());
+    }
 }
