@@ -1,4 +1,4 @@
-error: the argument '-l' cannot be used with '-c'
+error: the argument '-l' cannot be used with '--bytes'
 
 Usage: slice[EXE] -l <RANGE> [FILES]...
 

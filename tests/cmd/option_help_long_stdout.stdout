@@ -13,7 +13,7 @@ Arguments:
 Options:
   -l
           Slice the lines (default)
-  -c
+  -b, --bytes
           Slice the bytes
       --delimiter <DELIMITER>
           Slice by delimiter
