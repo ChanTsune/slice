@@ -73,6 +73,14 @@ fn report_error(path: &Path, err: &io::Error) {
     eprintln!("slice: {}: {}", path.display(), err);
 }
 
+// A broken pipe means a downstream consumer (e.g. `head`) closed early; that is
+// a normal stop request, not a failure, so we abort quietly without touching
+// the exit status.
+#[inline]
+fn is_broken_pipe(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::BrokenPipe
+}
+
 #[inline]
 fn multi<
     W: Write,
@@ -100,14 +108,16 @@ fn multi<
                 continue;
             }
         };
-        if print_header {
-            if let Err(err) = writeln!(out, "==> {} <==", target.display()) {
-                report_error(target, &err);
-                ok = false;
-                continue;
+        let result = (|| {
+            if print_header {
+                writeln!(out, "==> {} <==", target.display())?;
             }
-        }
-        if let Err(err) = f(input_wrapper(file), &mut out, range) {
+            f(input_wrapper(file), &mut out, range)
+        })();
+        if let Err(err) = result {
+            if is_broken_pipe(&err) {
+                return ok;
+            }
             report_error(target, &err);
             ok = false;
         }
@@ -145,6 +155,9 @@ fn entry(args: cli::Args) -> bool {
             line_mode(input, output, &args.range)
         };
         if let Err(err) = result {
+            if is_broken_pipe(&err) {
+                return true;
+            }
             eprintln!("slice: {err}");
             return false;
         }
@@ -376,6 +389,78 @@ mod tests {
 
                 assert_eq!(out, b"slice\xaabinary stream\nslice binary\xaastream");
             }
+        }
+    }
+
+    mod broken_pipe {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // A writer that fails every write with BrokenPipe, mimicking a
+        // downstream consumer (e.g. `head`) that closed the pipe early.
+        struct BrokenPipeWriter;
+
+        impl Write for BrokenPipeWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::from(io::ErrorKind::BrokenPipe))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::from(io::ErrorKind::BrokenPipe))
+            }
+        }
+
+        static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+        fn temp_file(contents: &[u8]) -> PathBuf {
+            let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "slice-broken-pipe-{}-{}.txt",
+                std::process::id(),
+                id
+            ));
+            fs::write(&path, contents).expect("write temp file");
+            path
+        }
+
+        #[test]
+        fn aborts_quietly_and_reports_success() {
+            let file = temp_file(b"line one\nline two\n");
+            let ok = multi(
+                std::slice::from_ref(&file),
+                BrokenPipeWriter,
+                io::BufReader::new,
+                &SliceRange::from_str("::").unwrap(),
+                false,
+                |input, output, range| line_mode(input, output, range),
+            );
+            fs::remove_file(&file).ok();
+
+            assert!(ok, "broken pipe must not fail the exit status");
+        }
+
+        #[test]
+        fn preserves_earlier_failure() {
+            let missing = std::env::temp_dir().join(format!(
+                "slice-broken-pipe-missing-{}.txt",
+                std::process::id()
+            ));
+            fs::remove_file(&missing).ok();
+            let readable = temp_file(b"line one\nline two\n");
+
+            // The missing file fails to open (a real error reported to stderr),
+            // then the broken pipe aborts the rest; the earlier failure must
+            // still be reflected in the returned status.
+            let ok = multi(
+                &[missing, readable.clone()],
+                BrokenPipeWriter,
+                io::BufReader::new,
+                &SliceRange::from_str("::").unwrap(),
+                false,
+                |input, output, range| line_mode(input, output, range),
+            );
+            fs::remove_file(&readable).ok();
+
+            assert!(!ok, "a failure before the broken pipe must be preserved");
         }
     }
 
