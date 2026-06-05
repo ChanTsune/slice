@@ -155,6 +155,30 @@ mod tests {
         }
 
         #[test]
+        fn allows_step_range_followed_at_end_boundary() {
+            let ranges = SliceRanges::from_str("0:6:2,6:7").expect("parse failed.");
+            assert_eq!(ranges.as_slice().len(), 2);
+        }
+
+        #[test]
+        fn rejects_step_range_followed_before_end_boundary() {
+            let err = SliceRanges::from_str("0:6:2,5:7").expect_err("range list must fail");
+            assert!(err.contains("streaming order"));
+        }
+
+        #[test]
+        fn allows_empty_range_before_output_range() {
+            let ranges = SliceRanges::from_str("0:0,0:2").expect("parse failed.");
+            assert_eq!(ranges.as_slice().len(), 2);
+        }
+
+        #[test]
+        fn allows_empty_range_between_output_ranges() {
+            let ranges = SliceRanges::from_str("0:2,1:1,2:3").expect("parse failed.");
+            assert_eq!(ranges.as_slice().len(), 3);
+        }
+
+        #[test]
         fn allows_empty_backward_range() {
             let ranges = SliceRanges::from_str("10:15,0:0").expect("parse failed.");
             assert_eq!(ranges.as_slice().len(), 2);
