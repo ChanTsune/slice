@@ -51,6 +51,13 @@ If `<file>` is not specified, `slice` will read from standard input.
 
 The slice syntax is similar to Python's slice syntax, with the format `start:end:step`.
 Each value is optional and, if omitted, defaults to the beginning of the file, the end of the file, and a step of 1, respectively.
+Multiple ranges can be provided as a comma-separated list:
+
+```sh
+slice 0:5,10:15 file.txt
+```
+
+Ranges are evaluated in the order written and are streamed without buffering the whole input. Because streams cannot be rewound, overlapping or backward ranges such as `10:15,0:5` or `0:5,3:7` are rejected.
 
 ## Examples
 
@@ -67,6 +74,12 @@ slice :100:2 file.txt
 ```
 
 This command slices the contents of `file.txt` from the beginning of the file to line 100, skipping every second line.
+
+```sh
+slice 0:5,10:15 file.txt
+```
+
+This command writes lines 0 through 4, then lines 10 through 14.
 
 ```sh
 slice 5:+10 file.txt

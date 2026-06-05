@@ -1,4 +1,4 @@
-use crate::range::SliceRange;
+use crate::range::SliceRanges;
 use bytesize::ByteSize;
 use clap::{ArgGroup, Parser};
 use std::{path::PathBuf, str::FromStr};
@@ -33,11 +33,13 @@ pub(crate) struct Args {
     #[arg(
         help = "The slice syntax is similar to Python's slice syntax, with the format `start:end:step`.
 Each value is optional and, if omitted, defaults to the start of the file, the end of the file, and a step of 1, respectively.
+Multiple ranges can be provided as a comma-separated list in streaming order; overlapping or backward ranges are rejected.
 e.g., '50:100', '50:100:1'
+and '0:5,10:15'
 and the extended syntax 'start:+line' is supported. (experimental)
 e.g., '50:+50'"
     )]
-    pub(crate) range: SliceRange,
+    pub(crate) range: SliceRanges,
     #[arg(short, help = "Slice the lines (default)")]
     pub(crate) lines: bool,
     #[arg(short, help = "Slice the bytes")]
@@ -68,19 +70,21 @@ impl Args {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::num::NonZeroUsize;
+    use crate::range::SliceRange;
+    use std::{num::NonZeroUsize, str::FromStr};
 
     #[test]
     fn line_mode_args() {
         let args = Args::parse_from(["slice", "-l", "0::1", "text.txt"]);
         assert!(args.lines);
+        assert_eq!(args.range, SliceRanges::from_str("0::1").unwrap());
         assert_eq!(
-            args.range,
-            SliceRange {
+            args.range.as_slice(),
+            &[SliceRange {
                 start: 0,
                 end: usize::MAX,
                 step: NonZeroUsize::new(1),
-            }
+            }]
         );
         assert_eq!(args.files, vec![PathBuf::from("text.txt")]);
     }
@@ -90,14 +94,34 @@ mod tests {
         let args = Args::parse_from(["slice", "-c", "0::1", "text.txt"]);
         assert!(args.characters);
         assert_eq!(
-            args.range,
-            SliceRange {
+            args.range.as_slice(),
+            &[SliceRange {
                 start: 0,
                 end: usize::MAX,
                 step: NonZeroUsize::new(1),
-            }
+            }]
         );
         assert_eq!(args.files, vec![PathBuf::from("text.txt")]);
+    }
+
+    #[test]
+    fn multiple_ranges_args() {
+        let args = Args::parse_from(["slice", "0:5,10:15", "text.txt"]);
+        assert_eq!(args.range, SliceRanges::from_str("0:5,10:15").unwrap());
+        assert_eq!(args.files, vec![PathBuf::from("text.txt")]);
+    }
+
+    #[test]
+    fn range_help_mentions_multiple_ranges() {
+        use clap::CommandFactory;
+        let cmd = Args::command();
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_id().as_str() == "range")
+            .expect("range arg");
+        let help = arg.get_help().expect("help text").to_string();
+        assert!(help.contains("comma-separated"));
+        assert!(help.contains("0:5,10:15"));
     }
 
     #[test]
