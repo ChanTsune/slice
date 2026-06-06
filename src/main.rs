@@ -16,6 +16,12 @@ use std::{
     process::ExitCode,
 };
 
+enum SliceMode<'b> {
+    Lines,
+    Bytes,
+    Custom(&'b [u8]),
+}
+
 #[inline]
 fn buf_reader<R: Read>(reader: R, capacity: Option<usize>) -> io::BufReader<R> {
     if let Some(capacity) = capacity {
@@ -82,16 +88,10 @@ fn is_broken_pipe(err: &io::Error) -> bool {
 }
 
 #[inline]
-fn multi<
-    W: Write,
-    R: BufRead,
-    IW: Fn(fs::File) -> R,
-    F: Fn(R, &mut W, &SliceRange) -> io::Result<()>,
->(
+fn multi<W: Write, R: BufRead, IW: Fn(fs::File) -> R, F: Fn(R, &mut W) -> io::Result<()>>(
     targets: &[PathBuf],
     mut out: W,
     input_wrapper: IW,
-    range: &SliceRange,
     print_header: bool,
     f: F,
 ) -> bool {
@@ -112,7 +112,7 @@ fn multi<
             if print_header {
                 writeln!(out, "==> {} <==", target.display())?;
             }
-            f(input_wrapper(file), &mut out, range)
+            f(input_wrapper(file), &mut out)
         })();
         if let Err(err) = result {
             if is_broken_pipe(&err) {
@@ -133,6 +133,7 @@ fn entry(args: cli::Args) -> bool {
             .error(clap::error::ErrorKind::ValueValidation, e)
             .exit(),
     };
+    let range = args.range;
     if args.explain {
         let unit = if args.bytes {
             "byte"
@@ -141,18 +142,23 @@ fn entry(args: cli::Args) -> bool {
         } else {
             "line"
         };
-        print!("{}", args.range.explain(unit));
+        print!("{}", range.explain(unit));
         return true;
     }
+    let mode = if args.bytes {
+        SliceMode::Bytes
+    } else if let Some(delimiter) = &delimiter {
+        SliceMode::Custom(delimiter)
+    } else {
+        SliceMode::Lines
+    };
     if args.files.is_empty() {
         let input = buf_reader(stdin().lock(), io_buffer_size);
         let output = buf_writer(stdout().lock(), io_buffer_size);
-        let result = if args.bytes {
-            byte_mode(input, output, &args.range)
-        } else if let Some(delimiter) = delimiter.as_deref() {
-            delimit_mode(input, output, delimiter, &args.range)
-        } else {
-            line_mode(input, output, &args.range)
+        let result = match mode {
+            SliceMode::Lines => line_mode(input, output, &range),
+            SliceMode::Bytes => byte_mode(input, output, &range),
+            SliceMode::Custom(delimiter) => delimit_mode(input, output, delimiter, &range),
         };
         if let Err(err) = result {
             if is_broken_pipe(&err) {
@@ -166,34 +172,17 @@ fn entry(args: cli::Args) -> bool {
         // A single file never gets a header, so -q only matters for 2+ files.
         let print_header = args.files.len() > 1 && !args.quiet_headers;
         let output = buf_writer(stdout().lock(), io_buffer_size);
-        if args.bytes {
-            multi(
-                &args.files,
-                output,
-                |input| buf_reader(input, io_buffer_size),
-                &args.range,
-                print_header,
-                |input, output, range| byte_mode(input, output, range),
-            )
-        } else if let Some(delimiter) = delimiter.as_deref() {
-            multi(
-                &args.files,
-                output,
-                |input| buf_reader(input, io_buffer_size),
-                &args.range,
-                print_header,
-                |input, output, range| delimit_mode(input, output, delimiter, range),
-            )
-        } else {
-            multi(
-                &args.files,
-                output,
-                |input| buf_reader(input, io_buffer_size),
-                &args.range,
-                print_header,
-                |input, output, range| line_mode(input, output, range),
-            )
-        }
+        multi(
+            &args.files,
+            output,
+            |input| buf_reader(input, io_buffer_size),
+            print_header,
+            |input, output| match mode {
+                SliceMode::Lines => line_mode(input, output, &range),
+                SliceMode::Bytes => byte_mode(input, output, &range),
+                SliceMode::Custom(delimiter) => delimit_mode(input, output, delimiter, &range),
+            },
+        )
     }
 }
 
@@ -429,9 +418,8 @@ mod tests {
                 std::slice::from_ref(&file),
                 BrokenPipeWriter,
                 io::BufReader::new,
-                &SliceRange::from_str("::").unwrap(),
                 false,
-                |input, output, range| line_mode(input, output, range),
+                |input, output| line_mode(input, output, &SliceRange::from_str("::").unwrap()),
             );
             fs::remove_file(&file).ok();
 
@@ -454,9 +442,8 @@ mod tests {
                 &[missing, readable.clone()],
                 BrokenPipeWriter,
                 io::BufReader::new,
-                &SliceRange::from_str("::").unwrap(),
                 false,
-                |input, output, range| line_mode(input, output, range),
+                |input, output| line_mode(input, output, &SliceRange::from_str("::").unwrap()),
             );
             fs::remove_file(&readable).ok();
 
