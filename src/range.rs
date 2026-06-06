@@ -6,7 +6,8 @@ use std::{
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub(crate) struct SliceRange {
     pub(crate) start: usize,
-    pub(crate) end: usize,
+    /// `None` means unbounded (run to the end of input).
+    pub(crate) end: Option<usize>,
     pub(crate) step: Option<NonZeroUsize>,
 }
 
@@ -15,28 +16,25 @@ impl SliceRange {
     /// without reading any input. `unit` names the elements (e.g. "line").
     pub(crate) fn explain(&self, unit: &str) -> String {
         let step = self.step.map_or(1, NonZeroUsize::get);
-        let unbounded = self.end == usize::MAX;
 
         let mut out = String::new();
         out.push_str(&format!("start: {}\n", self.start));
-        if unbounded {
-            out.push_str("end:   end of input\n");
-        } else {
-            out.push_str(&format!("end:   {} (exclusive)\n", self.end));
+        match self.end {
+            None => out.push_str("end:   end of input\n"),
+            Some(end) => out.push_str(&format!("end:   {end} (exclusive)\n")),
         }
         out.push_str(&format!("step:  {step}\n"));
 
         // 0-based selection, end exclusive.
-        if unbounded {
-            out.push_str(&format!(
+        match self.end {
+            None => out.push_str(&format!(
                 "0-based: {unit}s at indices [{}, end of input)",
                 self.start
-            ));
-        } else {
-            out.push_str(&format!(
-                "0-based: {unit}s at indices [{}, {})",
-                self.start, self.end
-            ));
+            )),
+            Some(end) => out.push_str(&format!(
+                "0-based: {unit}s at indices [{}, {end})",
+                self.start
+            )),
         }
         if step != 1 {
             out.push_str(&format!(", every {step} starting at {}", self.start));
@@ -45,46 +43,48 @@ impl SliceRange {
 
         // 1-based human positions ("Nth line").
         let first_pos = self.start + 1;
-        if unbounded {
-            if step == 1 {
-                out.push_str(&format!(
-                    "1-based: from the {} {unit} to the last {unit}\n",
-                    ordinal(first_pos)
-                ));
-            } else {
-                out.push_str(&format!(
-                    "1-based: every {step}{} {unit} from the {} {unit} to the last {unit}\n",
-                    ordinal_suffix(step),
-                    ordinal(first_pos)
-                ));
-            }
-            out.push_str(&format!("count: until end of input (step {step})"));
-        } else {
-            let last_pos = self.end; // end is exclusive 0-based, so the last selected 1-based position is `end`
-            if self.start >= self.end {
-                out.push_str(&format!(
-                    "1-based: empty (start {} is at or past end {})\n",
-                    first_pos, self.end
-                ));
-                out.push_str("count: 0");
-            } else {
+        match self.end {
+            None => {
                 if step == 1 {
                     out.push_str(&format!(
-                        "1-based: from the {} {unit} to the {} {unit}\n",
-                        ordinal(first_pos),
-                        ordinal(last_pos)
+                        "1-based: from the {} {unit} to the last {unit}\n",
+                        ordinal(first_pos)
                     ));
                 } else {
                     out.push_str(&format!(
-                        "1-based: every {step}{} {unit} from the {} {unit} up to the {} {unit}\n",
+                        "1-based: every {step}{} {unit} from the {} {unit} to the last {unit}\n",
                         ordinal_suffix(step),
-                        ordinal(first_pos),
-                        ordinal(last_pos)
+                        ordinal(first_pos)
                     ));
                 }
-                let span = self.end - self.start;
-                let count = span.div_ceil(step);
-                out.push_str(&format!("count: {count}"));
+                out.push_str(&format!("count: until end of input (step {step})"));
+            }
+            // end is exclusive 0-based, so the last selected 1-based position is `end`.
+            Some(end) => {
+                if self.start >= end {
+                    out.push_str(&format!(
+                        "1-based: empty (start {first_pos} is at or past end {end})\n"
+                    ));
+                    out.push_str("count: 0");
+                } else {
+                    if step == 1 {
+                        out.push_str(&format!(
+                            "1-based: from the {} {unit} to the {} {unit}\n",
+                            ordinal(first_pos),
+                            ordinal(end)
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "1-based: every {step}{} {unit} from the {} {unit} up to the {} {unit}\n",
+                            ordinal_suffix(step),
+                            ordinal(first_pos),
+                            ordinal(end)
+                        ));
+                    }
+                    let span = end - self.start;
+                    let count = span.div_ceil(step);
+                    out.push_str(&format!("count: {count}"));
+                }
             }
         }
         out.push('\n');
@@ -120,6 +120,13 @@ impl FromStr for SliceRange {
             }
             .map_err(|e| e.to_string())
         }
+        fn parse_opt(s: &str) -> Result<Option<usize>, String> {
+            match s.parse::<usize>() {
+                Ok(v) => Ok(Some(v)),
+                Err(err) if *err.kind() == IntErrorKind::Empty => Ok(None),
+                Err(err) => Err(err.to_string()),
+            }
+        }
         let mut ptn = s.split(':');
         let maybe_start = ptn
             .next()
@@ -129,13 +136,20 @@ impl FromStr for SliceRange {
             "range requires a ':' separator (e.g. '3:4', '3:', or ':3')".to_owned()
         })?;
         let (start, end) = if let Some(maybe_lines) = maybe_end.strip_prefix("+-") {
-            let lines = parse_or(maybe_lines, usize::MAX)?;
-            (start.saturating_sub(lines), start.saturating_add(lines))
+            match parse_opt(maybe_lines)? {
+                Some(lines) => (
+                    start.saturating_sub(lines),
+                    Some(start.saturating_add(lines)),
+                ),
+                None => (0, None),
+            }
         } else if let Some(maybe_lines) = maybe_end.strip_prefix('+') {
-            let lines = parse_or(maybe_lines, usize::MAX)?;
-            (start, start.saturating_add(lines))
+            match parse_opt(maybe_lines)? {
+                Some(lines) => (start, Some(start.saturating_add(lines))),
+                None => (start, None),
+            }
         } else {
-            (start, parse_or(maybe_end, usize::MAX)?)
+            (start, parse_opt(maybe_end)?)
         };
         let step = match ptn.next() {
             Some(step) => Some(parse_or(step, NonZeroUsize::MIN)?),
@@ -161,7 +175,7 @@ mod tests {
             slice,
             SliceRange {
                 start: 0,
-                end: 1,
+                end: Some(1),
                 step: NonZeroUsize::new(1),
             }
         );
@@ -174,7 +188,7 @@ mod tests {
             slice,
             SliceRange {
                 start: 0,
-                end: 1,
+                end: Some(1),
                 step: None,
             }
         );
@@ -183,7 +197,7 @@ mod tests {
             slice,
             SliceRange {
                 start: 0,
-                end: 1,
+                end: Some(1),
                 step: NonZeroUsize::new(1),
             }
         );
@@ -196,7 +210,7 @@ mod tests {
             slice,
             SliceRange {
                 start: 0,
-                end: 1,
+                end: Some(1),
                 step: NonZeroUsize::new(1),
             }
         );
@@ -209,7 +223,7 @@ mod tests {
             slice,
             SliceRange {
                 start: 0,
-                end: usize::MAX,
+                end: None,
                 step: NonZeroUsize::new(1),
             }
         );
@@ -222,7 +236,7 @@ mod tests {
             slice,
             SliceRange {
                 start: 0,
-                end: usize::MAX,
+                end: None,
                 step: NonZeroUsize::new(1),
             }
         );
@@ -235,7 +249,7 @@ mod tests {
             slice,
             SliceRange {
                 start: 0,
-                end: usize::MAX,
+                end: None,
                 step: None,
             }
         );
@@ -244,7 +258,7 @@ mod tests {
             slice,
             SliceRange {
                 start: 0,
-                end: usize::MAX,
+                end: None,
                 step: NonZeroUsize::new(1),
             }
         );
@@ -263,7 +277,7 @@ mod tests {
             slice,
             SliceRange {
                 start: 1,
-                end: 2,
+                end: Some(2),
                 step: None,
             }
         )
@@ -276,7 +290,7 @@ mod tests {
             slice,
             SliceRange {
                 start: 90,
-                end: 110,
+                end: Some(110),
                 step: None,
             }
         )
@@ -289,7 +303,7 @@ mod tests {
             slice,
             SliceRange {
                 start: 0,
-                end: 15,
+                end: Some(15),
                 step: None,
             }
         )
@@ -302,7 +316,7 @@ mod tests {
             slice,
             SliceRange {
                 start: 5,
-                end: usize::MAX,
+                end: None,
                 step: None,
             }
         )
@@ -315,7 +329,7 @@ mod tests {
             slice,
             SliceRange {
                 start: 0,
-                end: usize::MAX,
+                end: None,
                 step: None,
             }
         )
