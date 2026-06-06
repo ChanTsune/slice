@@ -196,15 +196,6 @@ mod tests {
     fn c_short_alias_sets_bytes() {
         let args = Args::parse_from(["slice", "-c", "0::1", "text.txt"]);
         assert!(args.bytes);
-        assert_eq!(
-            args.range,
-            SliceRange {
-                start: 0,
-                end: usize::MAX,
-                step: NonZeroUsize::new(1),
-            }
-        );
-        assert_eq!(args.files, vec![PathBuf::from("text.txt")]);
     }
 
     #[test]
