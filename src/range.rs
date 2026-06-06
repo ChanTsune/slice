@@ -48,8 +48,9 @@ impl SliceRange {
         }
         out.push('\n');
 
-        // 1-based human positions ("Nth line").
-        let first_pos = self.start + 1;
+        // 1-based human positions ("Nth line"). `start` can be `usize::MAX`
+        // (e.g. "18446744073709551615:"), so saturate instead of overflowing.
+        let first_pos = self.start.saturating_add(1);
         if unbounded {
             if step == 1 {
                 out.push_str(&format!(
@@ -379,6 +380,17 @@ mod tests {
             let text = SliceRange::from_str("5:5").unwrap().explain("line");
             assert!(text.contains("empty"));
             assert!(text.contains("count: 0"));
+        }
+
+        #[test]
+        fn start_at_usize_max_does_not_overflow() {
+            let range = SliceRange {
+                start: usize::MAX,
+                end: usize::MAX,
+                step: None,
+            };
+            let text = range.explain("line");
+            assert!(text.contains(&usize::MAX.to_string()));
         }
 
         #[test]
