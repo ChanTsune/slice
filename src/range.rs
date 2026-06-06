@@ -3,17 +3,22 @@ use std::{
     str::FromStr,
 };
 
+/// A resolved `start:end:step` selection over zero-indexed records.
+///
+/// `end == usize::MAX` marks an omitted end ("to end of input"); direct
+/// construction must uphold that convention. `step == None` behaves as a
+/// step of 1.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub(crate) struct SliceRange {
-    pub(crate) start: usize,
-    pub(crate) end: usize,
-    pub(crate) step: Option<NonZeroUsize>,
+pub struct SliceRange {
+    pub start: usize,
+    pub end: usize,
+    pub step: Option<NonZeroUsize>,
 }
 
 impl SliceRange {
     /// Render a human-readable description of what this resolved range selects,
     /// without reading any input. `unit` names the elements (e.g. "line").
-    pub(crate) fn explain(&self, unit: &str) -> String {
+    pub fn explain(&self, unit: &str) -> String {
         let step = self.step.map_or(1, NonZeroUsize::get);
         let unbounded = self.end == usize::MAX;
 

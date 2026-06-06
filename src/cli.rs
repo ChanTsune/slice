@@ -22,14 +22,16 @@ impl FromStr for NonZeroByteSize {
 
 #[derive(Parser, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 #[command(
-    name = env!("CARGO_BIN_NAME"),
+    // Must match the `[[bin]]` name in Cargo.toml; `env!("CARGO_BIN_NAME")` is
+    // not available when compiling the library target.
+    name = "slice",
     version,
     about,
     author,
     arg_required_else_help = true,
     group(ArgGroup::new("mode").args(["lines", "bytes", "delimiter", "null"])),
 )]
-pub(crate) struct Args {
+pub struct Args {
     #[arg(
         help = "The slice syntax is similar to Python's slice syntax, with the format `start:end:step`.
 Each value is optional and, if omitted, defaults to the start of the file, the end of the file, and a step of 1, respectively.
