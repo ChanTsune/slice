@@ -8,9 +8,9 @@ pub(crate) struct Slice<R>(StepBy<Skip<Take<R>>>);
 
 impl<R: Iterator> Slice<R> {
     #[inline]
-    fn new(r: R, start: usize, end: usize, step: Option<NonZeroUsize>) -> Self {
+    fn new(r: R, start: usize, end: Option<usize>, step: Option<NonZeroUsize>) -> Self {
         Self(
-            r.take(end)
+            r.take(end.unwrap_or(usize::MAX))
                 .skip(start)
                 .step_by(step.map(|step| step.get()).unwrap_or(1)),
         )
@@ -27,7 +27,7 @@ impl<I: Iterator> Iterator for Slice<I> {
 
 pub(crate) trait IteratorExt {
     #[inline]
-    fn slice(self, start: usize, stop: usize, skip: Option<NonZeroUsize>) -> Slice<Self>
+    fn slice(self, start: usize, stop: Option<usize>, skip: Option<NonZeroUsize>) -> Slice<Self>
     where
         Self: Sized + Iterator,
     {

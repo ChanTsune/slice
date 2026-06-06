@@ -151,7 +151,7 @@ mod tests {
             args.range,
             SliceRange {
                 start: 0,
-                end: usize::MAX,
+                end: None,
                 step: NonZeroUsize::new(1),
             }
         );
@@ -166,7 +166,7 @@ mod tests {
             args.range,
             SliceRange {
                 start: 0,
-                end: usize::MAX,
+                end: None,
                 step: NonZeroUsize::new(1),
             }
         );
@@ -193,7 +193,7 @@ mod tests {
             args.range,
             SliceRange {
                 start: 10,
-                end: 20,
+                end: Some(20),
                 step: None,
             }
         );
