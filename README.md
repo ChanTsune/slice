@@ -143,6 +143,7 @@ which needs a nightly toolchain (`rustup toolchain install nightly`):
 cargo +nightly fuzz run range_parser   # start:end:step syntax
 cargo +nightly fuzz run unescape       # --delimiter backslash escapes
 cargo +nightly fuzz run structured     # line/byte/delimit modes and --explain
+cargo +nightly fuzz run differential   # streaming output vs in-memory reference
 ```
 
 Each target runs until interrupted; crashing inputs are saved under `fuzz/artifacts/`.
