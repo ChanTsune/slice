@@ -134,6 +134,18 @@ I/O-error message and the `--version` string).
 
 [`trycmd`]: https://docs.rs/trycmd
 
+### Fuzzing
+
+The input parsers are fuzzed with [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz),
+which needs a nightly toolchain (`rustup toolchain install nightly`):
+
+```sh
+cargo +nightly fuzz run range_parser   # start:end:step syntax
+cargo +nightly fuzz run unescape       # --delimiter backslash escapes
+```
+
+Each target runs until interrupted; crashing inputs are saved under `fuzz/artifacts/`.
+
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).

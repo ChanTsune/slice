@@ -98,7 +98,9 @@ impl Args {
 
 /// Expand C-style backslash escapes (`\t \n \r \0 \\ \xHH`) into raw bytes.
 /// Non-escaped bytes pass through unchanged, so UTF-8 delimiters are preserved.
-fn unescape(s: &str) -> Result<Vec<u8>, String> {
+///
+/// Public so the fuzz harness can drive the parser directly.
+pub fn unescape(s: &str) -> Result<Vec<u8>, String> {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

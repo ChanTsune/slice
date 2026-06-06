@@ -1,0 +1,31 @@
+[package]
+name = "slice-command-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.slice-command]
+path = ".."
+
+[[bin]]
+name = "range_parser"
+path = "fuzz_targets/range_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "unescape"
+path = "fuzz_targets/unescape.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1
