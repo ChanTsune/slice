@@ -8,6 +8,7 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
+arbitrary = { version = "1", features = ["derive"] }
 libfuzzer-sys = "0.4"
 
 [dependencies.slice-command]
@@ -23,6 +24,13 @@ bench = false
 [[bin]]
 name = "unescape"
 path = "fuzz_targets/unescape.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "structured"
+path = "fuzz_targets/structured.rs"
 test = false
 doc = false
 bench = false

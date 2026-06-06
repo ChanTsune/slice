@@ -5,4 +5,4 @@ mod ext;
 pub mod range;
 mod run;
 
-pub use run::entry;
+pub use run::{byte_mode, delimit_mode, entry, line_mode};
