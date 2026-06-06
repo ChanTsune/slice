@@ -34,15 +34,232 @@ fn buf_writer<W: Write>(writer: W, capacity: Option<usize>) -> io::BufWriter<W> 
     }
 }
 
+/// Index just past the `need`-th occurrence of `delim` in `buf`, together with
+/// the number of occurrences found (capped at `need`).
 #[inline]
-fn line_mode<R: BufRead, W: Write>(input: R, mut output: W, range: &SliceRange) -> io::Result<()> {
-    for line in input
-        .lines_with_eol()
-        .slice(range.start, range.end, range.step)
-    {
-        output.write_all(&line?)?;
+fn scan_delims(buf: &[u8], delim: u8, need: usize) -> (usize, usize) {
+    let mut found = 0;
+    for i in memchr::memchr_iter(delim, buf) {
+        found += 1;
+        if found == need {
+            return (i + 1, found);
+        }
+    }
+    (buf.len(), found)
+}
+
+/// Whether item `i` is selected by `[start:end:step]`.
+#[inline]
+fn selected(i: usize, start: usize, end: usize, step: usize) -> bool {
+    i >= start && i < end && (i - start) % step == 0
+}
+
+/// Advance `input` past `start` bytes. Returns `false` if the stream ended
+/// before that many bytes were available.
+#[inline]
+fn skip_bytes<R: BufRead>(input: &mut R, start: usize) -> io::Result<bool> {
+    let mut pos = 0;
+    while pos < start {
+        let n = {
+            let buf = input.fill_buf()?;
+            if buf.is_empty() {
+                return Ok(false);
+            }
+            buf.len().min(start - pos)
+        };
+        input.consume(n);
+        pos += n;
+    }
+    Ok(true)
+}
+
+/// Copy the byte span `[start, end)` of the stream in bulk.
+#[inline]
+fn byte_range<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    start: usize,
+    end: usize,
+) -> io::Result<()> {
+    if !skip_bytes(input, start)? {
+        return Ok(());
+    }
+    if end == usize::MAX {
+        return io::copy(input, output).map(drop);
+    }
+    let mut pos = start;
+    while pos < end {
+        let n = {
+            let buf = input.fill_buf()?;
+            if buf.is_empty() {
+                break;
+            }
+            let take = buf.len().min(end - pos);
+            output.write_all(&buf[..take])?;
+            take
+        };
+        input.consume(n);
+        pos += n;
+    }
+    Ok(())
+}
+
+/// Emit the bytes `start, start + step, ...` that fall within `[start, end)`.
+#[inline]
+fn byte_stepped<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    start: usize,
+    end: usize,
+    step: usize,
+) -> io::Result<()> {
+    if !skip_bytes(input, start)? {
+        return Ok(());
+    }
+    let mut pos = start;
+    let mut next = start;
+    let mut scratch = Vec::new();
+    while next < end {
+        let n = {
+            let buf = input.fill_buf()?;
+            if buf.is_empty() {
+                break;
+            }
+            let base = next - pos;
+            if base < buf.len() {
+                let limit = buf.len().min(end - pos);
+                scratch.clear();
+                scratch.extend(buf[base..limit].iter().step_by(step).copied());
+                output.write_all(&scratch)?;
+                next += scratch.len() * step;
+            }
+            buf.len()
+        };
+        input.consume(n);
+        pos += n;
+    }
+    Ok(())
+}
+
+/// Consume `count` records terminated by `delim` (the delimiter is kept on each
+/// record), writing them to `output` when it is `Some`. Returns `false` if the
+/// stream ended before `count` records were seen.
+#[inline]
+fn consume_records<R: BufRead, W: Write>(
+    input: &mut R,
+    mut output: Option<&mut W>,
+    delim: u8,
+    mut count: usize,
+) -> io::Result<bool> {
+    while count > 0 {
+        let n = {
+            let buf = input.fill_buf()?;
+            if buf.is_empty() {
+                return Ok(false);
+            }
+            let (cut, found) = scan_delims(buf, delim, count);
+            if let Some(out) = output.as_deref_mut() {
+                out.write_all(&buf[..cut])?;
+            }
+            count -= found;
+            cut
+        };
+        input.consume(n);
+    }
+    Ok(true)
+}
+
+/// Slice records terminated by the single byte `delim` (the delimiter is kept
+/// on each record) for step 1: the result is the contiguous byte span from the
+/// start of record `start` through the end of record `end - 1`.
+#[inline]
+fn record_range<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    delim: u8,
+    start: usize,
+    end: usize,
+) -> io::Result<()> {
+    if end <= start {
+        return Ok(());
+    }
+    if !consume_records(input, None::<&mut W>, delim, start)? {
+        return Ok(());
+    }
+    if end == usize::MAX {
+        return io::copy(input, output).map(drop);
+    }
+    consume_records(input, Some(output), delim, end - start)?;
+    Ok(())
+}
+
+/// Slice records terminated by `delim` with a step greater than 1, writing the
+/// selected records directly from the read buffer without per-record allocation.
+#[inline]
+fn record_stepped<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+    delim: u8,
+    start: usize,
+    end: usize,
+    step: usize,
+) -> io::Result<()> {
+    let mut index = 0;
+    let mut keep = selected(0, start, end, step);
+    while index < end {
+        let (n, boundary) = {
+            let buf = input.fill_buf()?;
+            if buf.is_empty() {
+                break;
+            }
+            match memchr::memchr(delim, buf) {
+                Some(p) => {
+                    if keep {
+                        output.write_all(&buf[..=p])?;
+                    }
+                    (p + 1, true)
+                }
+                None => {
+                    if keep {
+                        output.write_all(buf)?;
+                    }
+                    (buf.len(), false)
+                }
+            }
+        };
+        input.consume(n);
+        if boundary {
+            index += 1;
+            keep = selected(index, start, end, step);
+        }
+    }
+    Ok(())
+}
+
+#[inline]
+fn record_mode<R: BufRead, W: Write>(
+    mut input: R,
+    mut output: W,
+    delim: u8,
+    range: &SliceRange,
+) -> io::Result<()> {
+    match range.step {
+        Some(step) if step.get() > 1 => record_stepped(
+            &mut input,
+            &mut output,
+            delim,
+            range.start,
+            range.end,
+            step.get(),
+        )?,
+        _ => record_range(&mut input, &mut output, delim, range.start, range.end)?,
     }
     output.flush()
+}
+
+#[inline]
+fn line_mode<R: BufRead, W: Write>(input: R, output: W, range: &SliceRange) -> io::Result<()> {
+    record_mode(input, output, b'\n', range)
 }
 
 #[inline]
@@ -52,19 +269,34 @@ fn delimit_mode<R: BufRead, W: Write>(
     delimiter: &[u8],
     range: &SliceRange,
 ) -> io::Result<()> {
-    for part in input
-        .delimit_by(delimiter)
-        .slice(range.start, range.end, range.step)
-    {
-        output.write_all(&part?)?;
+    match delimiter {
+        // An empty delimiter degrades to per-byte records, i.e. byte mode.
+        [] => byte_mode(input, output, range),
+        [delim] => record_mode(input, output, *delim, range),
+        // Multi-byte delimiters keep the generic split path.
+        _ => {
+            for part in input
+                .delimit_by(delimiter)
+                .slice(range.start, range.end, range.step)
+            {
+                output.write_all(&part?)?;
+            }
+            output.flush()
+        }
     }
-    output.flush()
 }
 
 #[inline]
-fn byte_mode<R: BufRead, W: Write>(input: R, mut output: W, range: &SliceRange) -> io::Result<()> {
-    for byte in input.bytes().slice(range.start, range.end, range.step) {
-        output.write_all(&[byte?])?;
+fn byte_mode<R: BufRead, W: Write>(
+    mut input: R,
+    mut output: W,
+    range: &SliceRange,
+) -> io::Result<()> {
+    match range.step {
+        Some(step) if step.get() > 1 => {
+            byte_stepped(&mut input, &mut output, range.start, range.end, step.get())?
+        }
+        _ => byte_range(&mut input, &mut output, range.start, range.end)?,
     }
     output.flush()
 }
