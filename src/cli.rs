@@ -94,16 +94,6 @@ impl Args {
     }
 }
 
-#[inline]
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
-
 /// Expand C-style backslash escapes (`\t \n \r \0 \\ \xHH`) into raw bytes.
 /// Non-escaped bytes pass through unchanged, so UTF-8 delimiters are preserved.
 fn unescape(s: &str) -> Result<Vec<u8>, String> {
@@ -128,20 +118,17 @@ fn unescape(s: &str) -> Result<Vec<u8>, String> {
             b'0' => out.push(0),
             b'\\' => out.push(b'\\'),
             b'x' => {
-                let (hi, lo) = match (bytes.get(i + 1), bytes.get(i + 2)) {
-                    (Some(&hi), Some(&lo)) => (hi, lo),
-                    _ => return Err("`\\x` needs two hex digits".to_owned()),
+                let (Some(&hi), Some(&lo)) = (bytes.get(i + 1), bytes.get(i + 2)) else {
+                    return Err("`\\x` needs two hex digits".to_owned());
                 };
-                let byte = hex_val(hi).zip(hex_val(lo)).map(|(h, l)| h << 4 | l);
-                match byte {
-                    Some(byte) => out.push(byte),
-                    None => {
-                        return Err(format!(
-                            "invalid hex escape `\\x{}{}`",
-                            hi as char, lo as char
-                        ))
-                    }
-                }
+                let (Some(h), Some(l)) = ((hi as char).to_digit(16), (lo as char).to_digit(16))
+                else {
+                    return Err(format!(
+                        "invalid hex escape `\\x{}{}`",
+                        hi as char, lo as char
+                    ));
+                };
+                out.push((h << 4 | l) as u8);
                 i += 2;
             }
             other => return Err(format!("unknown escape sequence `\\{}`", other as char)),
