@@ -11,12 +11,17 @@ impl<B: BufRead> Iterator for LinesWithEol<B> {
     #[inline]
     fn next(&mut self) -> Option<io::Result<Vec<u8>>> {
         let mut buf = Default::default();
-        match read_until(&mut self.buf, b'\n', &mut buf) {
+        match read_line(&mut self.buf, &mut buf) {
             Ok(0) => None,
             Ok(_n) => Some(Ok(buf)),
             Err(e) => Some(Err(e)),
         }
     }
+}
+
+#[inline]
+fn read_line<R: BufRead + ?Sized>(r: &mut R, buf: &mut Vec<u8>) -> io::Result<usize> {
+    read_until(r, b'\n', buf)
 }
 
 #[derive(Clone, Debug)]
@@ -30,25 +35,36 @@ impl<B: BufRead> Iterator for Delimited<'_, B> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(&last) = self.delimiter.last() {
-            let mut buf = Default::default();
-            loop {
-                match read_until(&mut self.buf, last, &mut buf) {
-                    Ok(0) => return if buf.is_empty() { None } else { Some(Ok(buf)) },
-                    Ok(_n) => {
-                        if buf.ends_with(self.delimiter) {
-                            return Some(Ok(buf));
-                        }
-                    }
-                    Err(e) => return Some(Err(e)),
-                }
+        let mut buf = Default::default();
+        match read_until_delim(&mut self.buf, self.delimiter, &mut buf) {
+            Ok(0) => None,
+            Ok(_n) => Some(Ok(buf)),
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
+#[inline]
+fn read_until_delim<R: BufRead + ?Sized>(
+    r: &mut R,
+    delimiter: &[u8],
+    buf: &mut Vec<u8>,
+) -> io::Result<usize> {
+    if let Some(&last) = delimiter.last() {
+        loop {
+            match read_until(r, last, buf)? {
+                0 => return Ok(buf.len()),
+                _ if buf.ends_with(delimiter) => return Ok(buf.len()),
+                _ => {}
             }
-        } else {
-            let mut buf = [0; 1];
-            match self.buf.read(&mut buf) {
-                Ok(0) => None,
-                Ok(_n) => Some(Ok(Vec::from(buf))),
-                Err(e) => Some(Err(e)),
+        }
+    } else {
+        let mut byte = [0; 1];
+        match r.read(&mut byte)? {
+            0 => Ok(0),
+            n => {
+                buf.extend_from_slice(&byte[..n]);
+                Ok(n)
             }
         }
     }
