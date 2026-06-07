@@ -40,6 +40,8 @@ pub(crate) enum ParseSliceRangeError {
         value: String,
         source: ParseIntError,
     },
+    #[error("a relative end ('+' or '+-') requires a count (e.g. '5:+3' or '5:+-3')")]
+    MissingRelativeAmount,
     #[error("too many ':' separators in range (expected at most start:end:step)")]
     TooManyParts,
 }
@@ -144,23 +146,11 @@ impl FromStr for SliceRange {
     type Err = ParseSliceRangeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        fn parse_or<T: FromStr<Err = ParseIntError>>(
+        fn parse<T: FromStr<Err = ParseIntError>>(
             s: &str,
-            empty: T,
             field: RangeField,
-        ) -> Result<T, ParseSliceRangeError> {
+        ) -> Result<Option<T>, ParseSliceRangeError> {
             match s.parse::<T>() {
-                Ok(v) => Ok(v),
-                Err(err) if *err.kind() == IntErrorKind::Empty => Ok(empty),
-                Err(source) => Err(ParseSliceRangeError::InvalidField {
-                    field,
-                    value: s.to_owned(),
-                    source,
-                }),
-            }
-        }
-        fn parse_opt(s: &str, field: RangeField) -> Result<Option<usize>, ParseSliceRangeError> {
-            match s.parse::<usize>() {
                 Ok(v) => Ok(Some(v)),
                 Err(err) if *err.kind() == IntErrorKind::Empty => Ok(None),
                 Err(source) => Err(ParseSliceRangeError::InvalidField {
@@ -170,30 +160,27 @@ impl FromStr for SliceRange {
                 }),
             }
         }
+        let relative_amount = |amount: &str| -> Result<usize, ParseSliceRangeError> {
+            parse(amount, RangeField::End)?.ok_or(ParseSliceRangeError::MissingRelativeAmount)
+        };
+
         let mut ptn = s.split(':');
-        // `split` always yields at least one element, so the `start` token is
-        // present even for an empty input (which parses to the default 0).
-        let maybe_start = ptn.next().unwrap_or("");
-        let start: usize = parse_or(maybe_start, 0, RangeField::Start)?;
+        let start = parse(ptn.next().unwrap_or(""), RangeField::Start)?.unwrap_or(0usize);
         let maybe_end = ptn.next().ok_or(ParseSliceRangeError::MissingColon)?;
-        let (start, end) = if let Some(maybe_lines) = maybe_end.strip_prefix("+-") {
-            match parse_opt(maybe_lines, RangeField::End)? {
-                Some(lines) => (
-                    start.saturating_sub(lines),
-                    Some(start.saturating_add(lines)),
-                ),
-                None => (0, None),
-            }
-        } else if let Some(maybe_lines) = maybe_end.strip_prefix('+') {
-            match parse_opt(maybe_lines, RangeField::End)? {
-                Some(lines) => (start, Some(start.saturating_add(lines))),
-                None => (start, None),
-            }
+        let (start, end) = if let Some(amount) = maybe_end.strip_prefix("+-") {
+            let lines = relative_amount(amount)?;
+            (
+                start.saturating_sub(lines),
+                Some(start.saturating_add(lines)),
+            )
+        } else if let Some(amount) = maybe_end.strip_prefix('+') {
+            let lines = relative_amount(amount)?;
+            (start, Some(start.saturating_add(lines)))
         } else {
-            (start, parse_opt(maybe_end, RangeField::End)?)
+            (start, parse(maybe_end, RangeField::End)?)
         };
         let step = match ptn.next() {
-            Some(step) => Some(parse_or(step, NonZeroUsize::MIN, RangeField::Step)?),
+            Some(step) => Some(parse(step, RangeField::Step)?.unwrap_or(NonZeroUsize::MIN)),
             None => None,
         };
         if ptn.next().is_some() {
@@ -348,32 +335,6 @@ mod tests {
         )
     }
 
-    #[test]
-    fn plus_sign_saturates_end() {
-        let slice = SliceRange::from_str("5:+").expect("parse failed.");
-        assert_eq!(
-            slice,
-            SliceRange {
-                start: 5,
-                end: None,
-                step: None,
-            }
-        )
-    }
-
-    #[test]
-    fn plus_minus_sign_saturates_both_ends() {
-        let slice = SliceRange::from_str("5:+-").expect("parse failed.");
-        assert_eq!(
-            slice,
-            SliceRange {
-                start: 0,
-                end: None,
-                step: None,
-            }
-        )
-    }
-
     mod explain {
         use super::*;
 
@@ -506,6 +467,29 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .starts_with("invalid step value 'x':"));
+        }
+
+        #[test]
+        fn relative_end_requires_a_count() {
+            assert_eq!(
+                SliceRange::from_str("5:+").unwrap_err(),
+                ParseSliceRangeError::MissingRelativeAmount
+            );
+            assert_eq!(
+                SliceRange::from_str("5:+-").unwrap_err(),
+                ParseSliceRangeError::MissingRelativeAmount
+            );
+        }
+
+        #[test]
+        fn relative_end_rejects_non_numeric_count() {
+            assert!(matches!(
+                SliceRange::from_str("1:+x").unwrap_err(),
+                ParseSliceRangeError::InvalidField {
+                    field: RangeField::End,
+                    ..
+                }
+            ));
         }
     }
 }
