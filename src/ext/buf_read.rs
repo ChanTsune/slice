@@ -11,7 +11,7 @@ impl<B: BufRead> Iterator for LinesWithEol<B> {
     #[inline]
     fn next(&mut self) -> Option<io::Result<Vec<u8>>> {
         let mut buf = Default::default();
-        match self.buf.read_until(b'\n', &mut buf) {
+        match read_until(&mut self.buf, b'\n', &mut buf) {
             Ok(0) => None,
             Ok(_n) => Some(Ok(buf)),
             Err(e) => Some(Err(e)),
@@ -30,10 +30,10 @@ impl<B: BufRead> Iterator for Delimited<'_, B> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(last) = self.delimiter.last() {
+        if let Some(&last) = self.delimiter.last() {
             let mut buf = Default::default();
             loop {
-                match self.buf.read_until(*last, &mut buf) {
+                match read_until(&mut self.buf, last, &mut buf) {
                     Ok(0) => return if buf.is_empty() { None } else { Some(Ok(buf)) },
                     Ok(_n) => {
                         if buf.ends_with(self.delimiter) {
@@ -76,6 +76,34 @@ pub(crate) trait BufReadExt {
 }
 
 impl<B: BufRead> BufReadExt for B {}
+
+fn read_until<R: BufRead + ?Sized>(r: &mut R, delim: u8, buf: &mut Vec<u8>) -> io::Result<usize> {
+    let mut read = 0;
+    loop {
+        let (done, used) = {
+            let available = match r.fill_buf() {
+                Ok(n) => n,
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+            match memchr::memchr(delim, available) {
+                Some(i) => {
+                    buf.extend_from_slice(&available[..=i]);
+                    (true, i + 1)
+                }
+                None => {
+                    buf.extend_from_slice(available);
+                    (false, available.len())
+                }
+            }
+        };
+        r.consume(used);
+        read += used;
+        if done || used == 0 {
+            return Ok(read);
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
