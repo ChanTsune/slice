@@ -11,6 +11,39 @@ pub(crate) struct SliceRange {
     pub(crate) step: Option<NonZeroUsize>,
 }
 
+/// Which numeric field of a `start:end:step` range failed to parse.
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub(crate) enum RangeField {
+    Start,
+    End,
+    Step,
+}
+
+impl std::fmt::Display for RangeField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            RangeField::Start => "start",
+            RangeField::End => "end",
+            RangeField::Step => "step",
+        })
+    }
+}
+
+/// Error produced while parsing a `SliceRange` from its `start:end:step` form.
+#[derive(Clone, Eq, PartialEq, Debug, thiserror::Error)]
+pub(crate) enum ParseSliceRangeError {
+    #[error("range requires a ':' separator (e.g. '3:4', '3:', or ':3')")]
+    MissingColon,
+    #[error("invalid {field} value '{value}': {source}")]
+    InvalidField {
+        field: RangeField,
+        value: String,
+        source: ParseIntError,
+    },
+    #[error("too many ':' separators in range (expected at most start:end:step)")]
+    TooManyParts,
+}
+
 impl SliceRange {
     /// Render a human-readable description of what this resolved range selects,
     /// without reading any input. `unit` names the elements (e.g. "line").
@@ -108,35 +141,43 @@ fn ordinal_suffix(n: usize) -> &'static str {
 }
 
 impl FromStr for SliceRange {
-    type Err = String;
+    type Err = ParseSliceRangeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        fn parse_or<T: FromStr<Err = ParseIntError>>(s: &str, empty: T) -> Result<T, String> {
-            let result: Result<T, ParseIntError> = s.parse();
-            match result {
+        fn parse_or<T: FromStr<Err = ParseIntError>>(
+            s: &str,
+            empty: T,
+            field: RangeField,
+        ) -> Result<T, ParseSliceRangeError> {
+            match s.parse::<T>() {
                 Ok(v) => Ok(v),
                 Err(err) if *err.kind() == IntErrorKind::Empty => Ok(empty),
-                Err(err) => Err(err),
+                Err(source) => Err(ParseSliceRangeError::InvalidField {
+                    field,
+                    value: s.to_owned(),
+                    source,
+                }),
             }
-            .map_err(|e| e.to_string())
         }
-        fn parse_opt(s: &str) -> Result<Option<usize>, String> {
+        fn parse_opt(s: &str, field: RangeField) -> Result<Option<usize>, ParseSliceRangeError> {
             match s.parse::<usize>() {
                 Ok(v) => Ok(Some(v)),
                 Err(err) if *err.kind() == IntErrorKind::Empty => Ok(None),
-                Err(err) => Err(err.to_string()),
+                Err(source) => Err(ParseSliceRangeError::InvalidField {
+                    field,
+                    value: s.to_owned(),
+                    source,
+                }),
             }
         }
         let mut ptn = s.split(':');
-        let maybe_start = ptn
-            .next()
-            .ok_or_else(|| "range start must be needed".to_owned())?;
-        let start: usize = parse_or(maybe_start, 0)?;
-        let maybe_end = ptn.next().ok_or_else(|| {
-            "range requires a ':' separator (e.g. '3:4', '3:', or ':3')".to_owned()
-        })?;
+        // `split` always yields at least one element, so the `start` token is
+        // present even for an empty input (which parses to the default 0).
+        let maybe_start = ptn.next().unwrap_or("");
+        let start: usize = parse_or(maybe_start, 0, RangeField::Start)?;
+        let maybe_end = ptn.next().ok_or(ParseSliceRangeError::MissingColon)?;
         let (start, end) = if let Some(maybe_lines) = maybe_end.strip_prefix("+-") {
-            match parse_opt(maybe_lines)? {
+            match parse_opt(maybe_lines, RangeField::End)? {
                 Some(lines) => (
                     start.saturating_sub(lines),
                     Some(start.saturating_add(lines)),
@@ -144,21 +185,19 @@ impl FromStr for SliceRange {
                 None => (0, None),
             }
         } else if let Some(maybe_lines) = maybe_end.strip_prefix('+') {
-            match parse_opt(maybe_lines)? {
+            match parse_opt(maybe_lines, RangeField::End)? {
                 Some(lines) => (start, Some(start.saturating_add(lines))),
                 None => (start, None),
             }
         } else {
-            (start, parse_opt(maybe_end)?)
+            (start, parse_opt(maybe_end, RangeField::End)?)
         };
         let step = match ptn.next() {
-            Some(step) => Some(parse_or(step, NonZeroUsize::MIN)?),
+            Some(step) => Some(parse_or(step, NonZeroUsize::MIN, RangeField::Step)?),
             None => None,
         };
         if ptn.next().is_some() {
-            return Err(
-                "too many ':' separators in range (expected at most start:end:step)".to_owned(),
-            );
+            return Err(ParseSliceRangeError::TooManyParts);
         }
         Ok(Self { start, end, step })
     }
@@ -426,8 +465,9 @@ mod tests {
         #[test]
         fn missing_colon() {
             let err = SliceRange::from_str("3").expect_err("bare number must be rejected");
+            assert_eq!(err, ParseSliceRangeError::MissingColon);
             assert_eq!(
-                err,
+                err.to_string(),
                 "range requires a ':' separator (e.g. '3:4', '3:', or ':3')"
             );
         }
@@ -437,6 +477,35 @@ mod tests {
             assert!(SliceRange::from_str("1:2:3:4").is_err());
             assert!(SliceRange::from_str("1:2:3:4:5").is_err());
             assert!(SliceRange::from_str(":::").is_err());
+        }
+
+        #[test]
+        fn invalid_field_names_which_part() {
+            assert!(matches!(
+                SliceRange::from_str("a:1").unwrap_err(),
+                ParseSliceRangeError::InvalidField {
+                    field: RangeField::Start,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                SliceRange::from_str("1:a").unwrap_err(),
+                ParseSliceRangeError::InvalidField {
+                    field: RangeField::End,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                SliceRange::from_str("1:1:b").unwrap_err(),
+                ParseSliceRangeError::InvalidField {
+                    field: RangeField::Step,
+                    ..
+                }
+            ));
+            assert!(SliceRange::from_str("1:5:x")
+                .unwrap_err()
+                .to_string()
+                .starts_with("invalid step value 'x':"));
         }
     }
 }

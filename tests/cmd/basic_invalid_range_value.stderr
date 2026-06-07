@@ -1,3 +1,3 @@
-error: invalid value 'a:1' for '<RANGE>': invalid digit found in string
+error: invalid value 'a:1' for '<RANGE>': invalid start value 'a': invalid digit found in string
 
 For more information, try '--help'.
