@@ -431,6 +431,7 @@ version = "0.4.3"
 dependencies = [
  "bytesize",
  "clap",
+ "memchr",
  "thiserror",
  "trycmd",
 ]
