@@ -81,6 +81,29 @@ fn explain_mode<W: Write>(mut output: W, range: &SliceRange, unit: &str) -> io::
     output.flush()
 }
 
+#[inline]
+fn copy_mode<R: BufRead, W: Write>(mut input: R, mut output: W) -> io::Result<()> {
+    io::copy(&mut input, &mut output)?;
+    output.flush()
+}
+
+#[inline]
+fn apply<R: BufRead, W: Write>(
+    mode: &SliceMode,
+    input: R,
+    output: W,
+    range: &SliceRange,
+) -> io::Result<()> {
+    if range.is_identity() {
+        return copy_mode(input, output);
+    }
+    match mode {
+        SliceMode::Lines => line_mode(input, output, range),
+        SliceMode::Bytes => byte_mode(input, output, range),
+        SliceMode::Custom(delimiter) => delimit_mode(input, output, delimiter, range),
+    }
+}
+
 fn report_error(path: &Path, err: &io::Error) {
     eprintln!("slice: {}: {}", path.display(), err);
 }
@@ -173,11 +196,7 @@ fn entry(args: cli::Args) -> bool {
     if args.files.is_empty() {
         let input = buf_reader(stdin().lock(), io_buffer_size);
         let output = buf_writer(stdout().lock(), io_buffer_size);
-        let result = match mode {
-            SliceMode::Lines => line_mode(input, output, &range),
-            SliceMode::Bytes => byte_mode(input, output, &range),
-            SliceMode::Custom(delimiter) => delimit_mode(input, output, delimiter, &range),
-        };
+        let result = apply(&mode, input, output, &range);
         stdout_status(result)
     } else {
         // A single file never gets a header, so -q only matters for 2+ files.
@@ -188,11 +207,7 @@ fn entry(args: cli::Args) -> bool {
             output,
             |input| buf_reader(input, io_buffer_size),
             print_header,
-            |input, output| match mode {
-                SliceMode::Lines => line_mode(input, output, &range),
-                SliceMode::Bytes => byte_mode(input, output, &range),
-                SliceMode::Custom(delimiter) => delimit_mode(input, output, delimiter, &range),
-            },
+            |input, output| apply(&mode, input, output, &range),
         )
     }
 }
@@ -612,6 +627,81 @@ mod tests {
             .expect("");
 
             assert_eq!(out, b"siecmadi ipesrn lcn omn.Lk  yhnsiesna.");
+        }
+    }
+
+    mod copy {
+        use super::*;
+
+        #[test]
+        fn empty_input() {
+            let mut out = Vec::new();
+            copy_mode(b"".as_slice(), &mut out).expect("");
+            assert_eq!(out, b"");
+        }
+
+        #[test]
+        fn verbatim_including_binary_and_missing_eol() {
+            let input = b"slice\xaabinary stream\nno trailing eol";
+            let mut out = Vec::new();
+            copy_mode(input.as_slice(), &mut out).expect("");
+            assert_eq!(out, input);
+        }
+    }
+
+    mod identity_fast_path {
+        use super::*;
+
+        const INPUT: &[u8] = b"a,b,c\nd,e,f\n";
+
+        fn applied(mode: SliceMode, range: &str) -> Vec<u8> {
+            let mut out = Vec::new();
+            apply(
+                &mode,
+                INPUT,
+                &mut out,
+                &SliceRange::from_str(range).unwrap(),
+            )
+            .expect("");
+            out
+        }
+
+        #[test]
+        fn lines_colon() {
+            assert_eq!(applied(SliceMode::Lines, ":"), INPUT);
+        }
+
+        #[test]
+        fn lines_colon_colon() {
+            assert_eq!(applied(SliceMode::Lines, "::"), INPUT);
+        }
+
+        #[test]
+        fn lines_explicit_unit_step() {
+            assert_eq!(applied(SliceMode::Lines, "0::1"), INPUT);
+        }
+
+        #[test]
+        fn bytes() {
+            assert_eq!(applied(SliceMode::Bytes, "::"), INPUT);
+        }
+
+        #[test]
+        fn custom_delimiter() {
+            assert_eq!(applied(SliceMode::Custom(b",".as_slice()), "::"), INPUT);
+        }
+
+        #[test]
+        fn non_identity_still_slices() {
+            let mut out = Vec::new();
+            apply(
+                &SliceMode::Lines,
+                b"a\nb\nc\n".as_slice(),
+                &mut out,
+                &SliceRange::from_str("1:").unwrap(),
+            )
+            .expect("");
+            assert_eq!(out, b"b\nc\n");
         }
     }
 }
