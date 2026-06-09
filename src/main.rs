@@ -11,7 +11,7 @@ use crate::{
 use clap::{CommandFactory, Parser};
 use std::{
     fs,
-    io::{self, stdin, stdout, BufRead, Read, Write},
+    io::{self, stdin, stdout, BufRead, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -75,6 +75,58 @@ fn byte_mode<R: BufRead, W: Write>(input: R, mut output: W, range: &SliceRange) 
     output.flush()
 }
 
+// stdin and pipes are not Seek; advance past `start` bytes by consuming them.
+#[inline]
+fn discard<R: BufRead>(reader: &mut R, mut n: u64) -> io::Result<()> {
+    while n > 0 {
+        let consumed = {
+            let buf = match reader.fill_buf() {
+                Ok(buf) => buf,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) => return Err(err),
+            };
+            if buf.is_empty() {
+                break;
+            }
+            buf.len().min(n as usize)
+        };
+        reader.consume(consumed);
+        n -= consumed as u64;
+    }
+    Ok(())
+}
+
+// Byte-mode unit-step fast-path: emits input bytes [start, min(end, len)),
+// matching IteratorExt::slice's take(end).skip(start) ordering — `end` is an
+// absolute index from the stream start, so start >= end yields an empty window.
+#[inline]
+fn byte_window<R, W, S>(
+    mut input: R,
+    mut output: W,
+    start: usize,
+    end: Option<usize>,
+    skip: S,
+) -> io::Result<()>
+where
+    R: BufRead,
+    W: Write,
+    S: Fn(&mut R, u64) -> io::Result<()>,
+{
+    if start > 0 {
+        skip(&mut input, start as u64)?;
+    }
+    match end {
+        Some(end) => {
+            let len = end.saturating_sub(start) as u64;
+            io::copy(&mut (&mut input).take(len), &mut output)?;
+        }
+        None => {
+            io::copy(&mut input, &mut output)?;
+        }
+    }
+    output.flush()
+}
+
 #[inline]
 fn explain_mode<W: Write>(mut output: W, range: &SliceRange, unit: &str) -> io::Result<()> {
     output.write_all(range.explain(unit).as_bytes())?;
@@ -88,18 +140,30 @@ fn copy_mode<R: BufRead, W: Write>(mut input: R, mut output: W) -> io::Result<()
 }
 
 #[inline]
-fn apply<R: BufRead, W: Write>(
+fn apply<R, W, S>(
     mode: &SliceMode,
     input: R,
     output: W,
     range: &SliceRange,
-) -> io::Result<()> {
+    skip: S,
+) -> io::Result<()>
+where
+    R: BufRead,
+    W: Write,
+    S: Fn(&mut R, u64) -> io::Result<()>,
+{
     if range.is_identity() {
         return copy_mode(input, output);
     }
     match mode {
         SliceMode::Lines => line_mode(input, output, range),
-        SliceMode::Bytes => byte_mode(input, output, range),
+        SliceMode::Bytes => {
+            if range.is_unit_step() {
+                byte_window(input, output, range.start, range.end, skip)
+            } else {
+                byte_mode(input, output, range)
+            }
+        }
         SliceMode::Custom(delimiter) => delimit_mode(input, output, delimiter, range),
     }
 }
@@ -196,7 +260,7 @@ fn entry(args: cli::Args) -> bool {
     if args.files.is_empty() {
         let input = buf_reader(stdin().lock(), io_buffer_size);
         let output = buf_writer(stdout().lock(), io_buffer_size);
-        let result = apply(&mode, input, output, &range);
+        let result = apply(&mode, input, output, &range, discard);
         stdout_status(result)
     } else {
         // A single file never gets a header, so -q only matters for 2+ files.
@@ -207,7 +271,15 @@ fn entry(args: cli::Args) -> bool {
             output,
             |input| buf_reader(input, io_buffer_size),
             print_header,
-            |input, output| apply(&mode, input, output, &range),
+            |input, output| {
+                apply(
+                    &mode,
+                    input,
+                    output,
+                    &range,
+                    |r: &mut io::BufReader<fs::File>, n| r.seek(SeekFrom::Start(n)).map(drop),
+                )
+            },
         )
     }
 }
@@ -535,6 +607,24 @@ mod tests {
 
             assert!(!ok, "a failure before the broken pipe must be preserved");
         }
+
+        #[test]
+        fn byte_window_propagates_broken_pipe() {
+            let file = temp_file(b"line one\nline two\n");
+            let reader = io::BufReader::new(fs::File::open(&file).expect("open temp file"));
+            let range = SliceRange::from_str("0:3").unwrap();
+            let err = byte_window(
+                reader,
+                BrokenPipeWriter,
+                range.start,
+                range.end,
+                |r: &mut io::BufReader<fs::File>, n| r.seek(SeekFrom::Start(n)).map(drop),
+            )
+            .expect_err("a broken pipe must propagate from the window path");
+            fs::remove_file(&file).ok();
+
+            assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        }
     }
 
     mod byte {
@@ -630,6 +720,132 @@ mod tests {
         }
     }
 
+    mod byte_window {
+        use super::*;
+
+        const FIXTURE: &[u8] =
+            b"slice command is simple string slicing command.\nLike a python slice syntax.\n";
+
+        fn windowed(input: &[u8], range: &str) -> Vec<u8> {
+            let range = SliceRange::from_str(range).unwrap();
+            let mut out = Vec::new();
+            byte_window(input, &mut out, range.start, range.end, discard).expect("");
+            out
+        }
+
+        #[test]
+        fn skip_first() {
+            assert_eq!(
+                windowed(FIXTURE, "10:"),
+                b"and is simple string slicing command.\nLike a python slice syntax.\n"
+            );
+        }
+
+        #[test]
+        fn drop_last() {
+            assert_eq!(windowed(FIXTURE, ":15"), b"slice command i");
+        }
+
+        #[test]
+        fn skip_first_and_drop_last() {
+            assert_eq!(windowed(FIXTURE, "5:15"), b" command i");
+        }
+
+        #[test]
+        fn unbounded_from_offset_no_trailing_newline() {
+            assert_eq!(windowed(b"abcde", "2:"), b"cde");
+        }
+
+        #[test]
+        fn start_at_or_past_end_is_empty() {
+            assert_eq!(windowed(FIXTURE, "3:1"), b"");
+        }
+
+        #[test]
+        fn start_past_eof_is_empty() {
+            assert_eq!(windowed(FIXTURE, "200:"), b"");
+        }
+
+        #[test]
+        fn bounded_window_past_eof_stops_at_eof() {
+            assert_eq!(windowed(FIXTURE, "70:1000"), b"ntax.\n");
+        }
+
+        #[test]
+        fn end_beyond_len_stops_at_eof() {
+            assert_eq!(windowed(b"abc", "0:5"), b"abc");
+        }
+
+        #[test]
+        fn empty_input() {
+            assert_eq!(windowed(b"", "::"), b"");
+            assert_eq!(windowed(b"", "0:5"), b"");
+        }
+
+        #[test]
+        fn binary_is_preserved_byte_exact() {
+            let input = b"sl\xaace\xaabinary stream without newline";
+            assert_eq!(
+                windowed(input, "2:"),
+                b"\xaace\xaabinary stream without newline"
+            );
+        }
+    }
+
+    mod seek_vs_discard {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+        fn temp_file(contents: &[u8]) -> PathBuf {
+            let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "slice-seek-vs-discard-{}-{}.txt",
+                std::process::id(),
+                id
+            ));
+            fs::write(&path, contents).expect("write temp file");
+            path
+        }
+
+        fn via_discard(input: &[u8], range: &SliceRange) -> Vec<u8> {
+            let mut out = Vec::new();
+            byte_window(input, &mut out, range.start, range.end, discard).expect("");
+            out
+        }
+
+        fn via_seek(path: &Path, range: &SliceRange) -> Vec<u8> {
+            let reader = io::BufReader::new(fs::File::open(path).expect("open temp file"));
+            let mut out = Vec::new();
+            byte_window(
+                reader,
+                &mut out,
+                range.start,
+                range.end,
+                |r: &mut io::BufReader<fs::File>, n| r.seek(SeekFrom::Start(n)).map(drop),
+            )
+            .expect("");
+            out
+        }
+
+        #[test]
+        fn seek_matches_discard() {
+            let input =
+                b"slice command is simple string slicing command.\nLike a python slice syntax.\n";
+            let path = temp_file(input);
+            for range in ["10:", "5:15", "0:4", "200:"] {
+                let range = SliceRange::from_str(range).unwrap();
+                assert_eq!(
+                    via_seek(&path, &range),
+                    via_discard(input, &range),
+                    "seek and discard diverged for {range:?}"
+                );
+            }
+            fs::remove_file(&path).ok();
+        }
+    }
+
     mod copy {
         use super::*;
 
@@ -661,6 +877,7 @@ mod tests {
                 INPUT,
                 &mut out,
                 &SliceRange::from_str(range).unwrap(),
+                discard,
             )
             .expect("");
             out
@@ -699,6 +916,7 @@ mod tests {
                 b"a\nb\nc\n".as_slice(),
                 &mut out,
                 &SliceRange::from_str("1:").unwrap(),
+                discard,
             )
             .expect("");
             assert_eq!(out, b"b\nc\n");

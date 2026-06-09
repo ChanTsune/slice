@@ -47,12 +47,20 @@ pub(crate) enum ParseSliceRangeError {
 }
 
 impl SliceRange {
+    /// True when `step` is `None` or `1`: every element survives in order, so a
+    /// contiguous copy reproduces the stepped iterator. `is_identity` is the
+    /// `start == 0 && end == None` special case of this.
+    #[inline]
+    pub(crate) fn is_unit_step(&self) -> bool {
+        self.step.is_none_or(|step| step.get() == 1)
+    }
+
     /// True when the range selects the whole input unchanged (`:`, `::`, `0::1`):
     /// the output then equals the input byte-for-byte in every mode, so the
     /// splitting pipeline can be skipped in favor of a verbatim copy.
     #[inline]
     pub(crate) fn is_identity(&self) -> bool {
-        self.start == 0 && self.end.is_none() && self.step.is_none_or(|step| step.get() == 1)
+        self.start == 0 && self.end.is_none() && self.is_unit_step()
     }
 
     /// Render a human-readable description of what this resolved range selects,
@@ -316,6 +324,22 @@ mod tests {
             assert!(
                 !SliceRange::from_str(sliced).unwrap().is_identity(),
                 "{sliced} must not be treated as identity"
+            );
+        }
+    }
+
+    #[test]
+    fn is_unit_step_recognizes_none_or_one_step() {
+        for unit in [":", "::", "0::1", "10:", "5:15", ":15", "1:+3"] {
+            assert!(
+                SliceRange::from_str(unit).unwrap().is_unit_step(),
+                "{unit} should be unit step"
+            );
+        }
+        for stepped in ["::2", "::6", "1:8:2"] {
+            assert!(
+                !SliceRange::from_str(stepped).unwrap().is_unit_step(),
+                "{stepped} must not be treated as unit step"
             );
         }
     }
