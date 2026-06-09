@@ -5,7 +5,7 @@ mod ext;
 mod range;
 
 use crate::{
-    ext::{BufReadExt, IteratorExt},
+    ext::{slice_window, BufReadExt, Byte, Bytes, IteratorExt, PerByte, Split},
     range::SliceRange,
 };
 use clap::{CommandFactory, Parser};
@@ -54,17 +54,43 @@ fn line_mode<R: BufRead, W: Write>(input: R, mut output: W, range: &SliceRange) 
 #[inline]
 fn delimit_mode<R: BufRead, W: Write>(
     input: R,
-    mut output: W,
+    output: W,
     delimiter: &[u8],
     range: &SliceRange,
 ) -> io::Result<()> {
-    for part in input
-        .delimit_by(delimiter)
-        .slice(range.start, range.end, range.step)
-    {
-        output.write_all(&part?)?;
+    fn run<S: Split, R: BufRead, W: Write>(
+        split: S,
+        input: R,
+        mut output: W,
+        range: &SliceRange,
+    ) -> io::Result<()> {
+        for part in input
+            .split_chunks(split)
+            .slice(range.start, range.end, range.step)
+        {
+            output.write_all(&part?)?;
+        }
+        output.flush()
     }
-    output.flush()
+    match delimiter {
+        [] => run(PerByte, input, output, range),
+        &[b] => run(Byte(b), input, output, range),
+        multi => run(Bytes(multi), input, output, range),
+    }
+}
+
+#[inline]
+fn delimit_window<R: BufRead, W: Write>(
+    input: R,
+    output: W,
+    delimiter: &[u8],
+    range: &SliceRange,
+) -> io::Result<()> {
+    match delimiter {
+        [] => slice_window(PerByte, input, output, range.start, range.end),
+        &[b] => slice_window(Byte(b), input, output, range.start, range.end),
+        multi => slice_window(Bytes(multi), input, output, range.start, range.end),
+    }
 }
 
 #[inline]
@@ -156,7 +182,13 @@ where
         return copy_mode(input, output);
     }
     match mode {
-        SliceMode::Lines => line_mode(input, output, range),
+        SliceMode::Lines => {
+            if range.is_unit_step() {
+                slice_window(Byte(b'\n'), input, output, range.start, range.end)
+            } else {
+                line_mode(input, output, range)
+            }
+        }
         SliceMode::Bytes => {
             if range.is_unit_step() {
                 byte_window(input, output, range.start, range.end, skip)
@@ -164,7 +196,13 @@ where
                 byte_mode(input, output, range)
             }
         }
-        SliceMode::Custom(delimiter) => delimit_mode(input, output, delimiter, range),
+        SliceMode::Custom(delimiter) => {
+            if range.is_unit_step() {
+                delimit_window(input, output, delimiter, range)
+            } else {
+                delimit_mode(input, output, delimiter, range)
+            }
+        }
     }
 }
 
@@ -625,6 +663,27 @@ mod tests {
 
             assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
         }
+
+        #[test]
+        fn slice_window_propagates_broken_pipe() {
+            let file = temp_file(b"line one\nline two\nline three\n");
+            // Both window arms must surface the broken pipe: unbounded `1:`
+            // exercises the io::copy tail, bounded `0:3` the write_all loop.
+            for range in ["1:", "0:3"] {
+                let reader = io::BufReader::new(fs::File::open(&file).expect("open temp file"));
+                let range = SliceRange::from_str(range).unwrap();
+                let err = slice_window(
+                    Byte(b'\n'),
+                    reader,
+                    BrokenPipeWriter,
+                    range.start,
+                    range.end,
+                )
+                .expect_err("a broken pipe must propagate from slice_window");
+                assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+            }
+            fs::remove_file(&file).ok();
+        }
     }
 
     mod byte {
@@ -920,6 +979,78 @@ mod tests {
             )
             .expect("");
             assert_eq!(out, b"b\nc\n");
+        }
+
+        #[test]
+        fn custom_unit_step_matches_delimit_mode() {
+            // The unit-step Custom window (delimit_window) must agree with the
+            // step>1 iterator path (delimit_mode) for every delimiter shape.
+            fn agree(delimiter: &[u8], input: &[u8], range: &str) -> Vec<u8> {
+                let range = SliceRange::from_str(range).unwrap();
+                let mut via_apply = Vec::new();
+                apply(
+                    &SliceMode::Custom(delimiter),
+                    input,
+                    &mut via_apply,
+                    &range,
+                    discard,
+                )
+                .expect("");
+                let mut via_iter = Vec::new();
+                delimit_mode(input, &mut via_iter, delimiter, &range).expect("");
+                assert_eq!(
+                    via_apply, via_iter,
+                    "apply vs delimit_mode for {delimiter:?} {range:?}"
+                );
+                via_apply
+            }
+            assert_eq!(agree(b"||", b"a||b||c\n", "1:"), b"b||c\n"); // multi-byte
+            assert_eq!(agree(b",", b"a,b,c,", "1:"), b"b,c,"); // single-byte
+            assert_eq!(agree(b"", b"abcdef", "1:4"), b"bcd"); // empty (PerByte)
+        }
+    }
+
+    mod slice_window {
+        use super::*;
+        use crate::ext::Byte;
+
+        fn windowed(input: &[u8], range: &str) -> Vec<u8> {
+            let range = SliceRange::from_str(range).unwrap();
+            let mut out = Vec::new();
+            slice_window(Byte(b'\n'), input, &mut out, range.start, range.end).expect("");
+            out
+        }
+
+        #[test]
+        fn unbounded_from_offset() {
+            assert_eq!(windowed(b"a\nb\nc\n", "1:"), b"b\nc\n");
+        }
+
+        #[test]
+        fn bounded_drop_tail() {
+            assert_eq!(windowed(b"a\nb\nc\n", ":1"), b"a\n");
+        }
+
+        #[test]
+        fn unbounded_last_line_without_newline() {
+            assert_eq!(windowed(b"a\nb", "1:"), b"b");
+        }
+
+        #[test]
+        fn empty_bounded_window() {
+            assert_eq!(windowed(b"a\nb\nc\n", ":0"), b"");
+        }
+
+        #[test]
+        fn skip_past_eof_is_empty() {
+            assert_eq!(windowed(b"a\nb\n", "2:"), b"");
+        }
+
+        #[test]
+        fn empty_input() {
+            assert_eq!(windowed(b"", "::"), b"");
+            assert_eq!(windowed(b"", "1:"), b"");
+            assert_eq!(windowed(b"", "0:3"), b"");
         }
     }
 }
