@@ -1,4 +1,5 @@
 use crate::ext::IteratorExt;
+use memchr::memmem;
 use std::{
     io::{self, BufRead, Write},
     num::NonZeroUsize,
@@ -66,9 +67,27 @@ pub(crate) trait Split {
 /// Single-byte delimiter. Lines are `Byte(b'\n')`, `-z` is `Byte(0)`.
 pub(crate) struct Byte(pub u8);
 
-/// Multi-byte delimiter (`self.0.len() >= 2`; constructed only by the
-/// delimiter-shape dispatch).
-pub(crate) struct Bytes<'d>(pub &'d [u8]);
+/// Multi-byte delimiter (len >= 2; constructed only by the delimiter-shape
+/// dispatch). The `memmem` finder is precomputed here so its searcher setup is
+/// paid once per run, not once per chunk.
+pub(crate) struct Bytes<'d> {
+    delimiter: &'d [u8],
+    finder: memmem::Finder<'d>,
+}
+
+impl<'d> Bytes<'d> {
+    #[inline]
+    pub(crate) fn new(delimiter: &'d [u8]) -> Self {
+        debug_assert!(
+            delimiter.len() >= 2,
+            "single-byte and empty delimiters dispatch to other kinds"
+        );
+        Self {
+            delimiter,
+            finder: memmem::Finder::new(delimiter),
+        }
+    }
+}
 
 impl Split for Byte {
     #[inline]
@@ -84,102 +103,90 @@ impl Split for Byte {
 impl Split for Bytes<'_> {
     #[inline]
     fn read<R: BufRead + ?Sized>(&self, r: &mut R, buf: &mut Vec<u8>) -> io::Result<usize> {
-        let last = *self.0.last().expect("Bytes delimiter is non-empty");
-        loop {
-            match read_until(r, last, buf)? {
-                0 => return Ok(buf.len()),
-                _ if buf.ends_with(self.0) => return Ok(buf.len()),
-                _ => {}
-            }
-        }
+        scan_until_delim(r, self.delimiter, &self.finder, |chunk| {
+            buf.extend_from_slice(chunk)
+        })
     }
 
     #[inline]
     fn skip<R: BufRead + ?Sized>(&self, r: &mut R) -> io::Result<usize> {
-        skip_until_delim(r, self.0)
+        scan_until_delim(r, self.delimiter, &self.finder, |_| {})
     }
 }
 
-/// Skip one multi-byte-delimited chunk without retaining the chunk.
+/// Multi-byte counterpart of `scan_until`: scan to the first full `delimiter`
+/// match, same contract (`sink` receives each consumed slice, `Ok(0)` means
+/// EOF, the final chunk may lack the delimiter).
 ///
-/// A delimiter can straddle a `fill_buf` boundary, so we carry a rolling `tail`
-/// of the bytes seen *within the current chunk* and reproduce `read`'s
-/// `buf.ends_with(delimiter)` check against `tail`. Two invariants make this
-/// match `Bytes::read` exactly:
-///   * the tail only ever holds bytes belonging to the current chunk, so a match
-///     can never span a previous chunk boundary, and
-///   * on a confirmed match the chunk ends and the tail is CLEARED — the matched
-///     delimiter's bytes belong to the just-ended chunk and must not seed the
-///     next chunk's match window (e.g. `aaaaaa` with `aaa` -> `aaa`, `aaa`).
-///
-/// To bound memory the tail is trimmed to the last `delimiter.len() - 1` bytes
-/// after each non-matching scan (a longer prefix can never complete a match).
-fn skip_until_delim<R: BufRead + ?Sized>(r: &mut R, delimiter: &[u8]) -> io::Result<usize> {
-    let last = *delimiter.last().expect("multi-byte delimiter is non-empty");
+/// A match can straddle a `fill_buf` boundary, so the last `delimiter.len() - 1`
+/// consumed bytes are carried across blocks. Each block is searched in two
+/// stages, straddle first: the probe (`carry` ++ the block's first
+/// `delimiter.len() - 1` bytes) is too short to hold a match starting inside
+/// the block, so any probe hit starts in the carry and precedes every in-block
+/// hit — the leftmost match overall wins. The carry lives for one chunk only,
+/// so a confirmed match never seeds the next chunk's window (`aaaaaa` with
+/// `aaa` -> `aaa`, `aaa`).
+fn scan_until_delim<R: BufRead + ?Sized>(
+    r: &mut R,
+    delimiter: &[u8],
+    finder: &memmem::Finder<'_>,
+    mut sink: impl FnMut(&[u8]),
+) -> io::Result<usize> {
     let keep = delimiter.len() - 1;
-    let mut tail: Vec<u8> = Vec::with_capacity(keep);
-    let mut read = 0usize;
+    // Allocated lazily: the carry is only written when a chunk spans a
+    // fill_buf boundary, so non-straddling chunks stay allocation-free.
+    let mut carry: Vec<u8> = Vec::new();
+    let mut read = 0;
     loop {
         let (done, used) = {
-            let available = match r.fill_buf() {
+            let block = match r.fill_buf() {
                 Ok(n) => n,
                 Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
             };
-            match memchr::memchr(last, available) {
-                Some(i) => {
-                    if ends_with_across(&tail, &available[..=i], delimiter) {
-                        (true, i + 1)
-                    } else {
-                        extend_tail(&mut tail, &available[..=i], keep);
-                        (false, i + 1)
-                    }
+            if block.is_empty() {
+                return Ok(read);
+            }
+            let straddle = if carry.is_empty() {
+                None
+            } else {
+                let carried = carry.len();
+                carry.extend_from_slice(&block[..block.len().min(keep)]);
+                let hit = finder.find(&carry).map(|p| p + delimiter.len() - carried);
+                carry.truncate(carried);
+                hit
+            };
+            match straddle.or_else(|| finder.find(block).map(|i| i + delimiter.len())) {
+                Some(used) => {
+                    sink(&block[..used]);
+                    (true, used)
                 }
                 None => {
-                    extend_tail(&mut tail, available, keep);
-                    (false, available.len())
+                    sink(block);
+                    extend_carry(&mut carry, block, keep);
+                    (false, block.len())
                 }
             }
         };
         r.consume(used);
         read += used;
-        if done || used == 0 {
+        if done {
             return Ok(read);
         }
     }
 }
 
-/// True iff `(tail ++ recent)` ends with `delimiter`. `recent` is the slice just
-/// scanned (ending at the candidate `last` byte); `tail` holds earlier bytes of
-/// the same chunk. Compares only the trailing `delimiter.len()` bytes.
+/// Append `block` to `carry`, keeping only the trailing `keep` bytes (the most
+/// a future delimiter match could need from before the current scan position).
 #[inline]
-fn ends_with_across(tail: &[u8], recent: &[u8], delimiter: &[u8]) -> bool {
-    let need = delimiter.len();
-    if tail.len() + recent.len() < need {
-        return false;
-    }
-    let from_recent = recent.len().min(need);
-    let from_tail = need - from_recent;
-    if recent[recent.len() - from_recent..] != delimiter[need - from_recent..] {
-        return false;
-    }
-    from_tail == 0 || tail[tail.len() - from_tail..] == delimiter[..from_tail]
-}
-
-/// Append `chunk` to `tail`, keeping only the trailing `keep` bytes (the most a
-/// future delimiter match could need from before the current scan position).
-#[inline]
-fn extend_tail(tail: &mut Vec<u8>, chunk: &[u8], keep: usize) {
-    if keep == 0 {
-        return;
-    }
-    if chunk.len() >= keep {
-        tail.clear();
-        tail.extend_from_slice(&chunk[chunk.len() - keep..]);
+fn extend_carry(carry: &mut Vec<u8>, block: &[u8], keep: usize) {
+    if block.len() >= keep {
+        carry.clear();
+        carry.extend_from_slice(&block[block.len() - keep..]);
     } else {
-        let overflow = (tail.len() + chunk.len()).saturating_sub(keep);
-        tail.drain(..overflow);
-        tail.extend_from_slice(chunk);
+        let overflow = (carry.len() + block.len()).saturating_sub(keep);
+        carry.drain(..overflow);
+        carry.extend_from_slice(block);
     }
 }
 
@@ -301,7 +308,11 @@ mod tests {
 
     // Every chunk the Split produces, in order — the materialized chunking spec.
     fn chunks<S: Split>(split: S, input: &[u8]) -> Vec<Vec<u8>> {
-        let mut input = BufReader::new(input);
+        chunks_at(split, input, 8 * 1024)
+    }
+
+    fn chunks_at<S: Split>(split: S, input: &[u8], capacity: usize) -> Vec<Vec<u8>> {
+        let mut input = BufReader::with_capacity(capacity, input);
         let mut chunks = Vec::new();
         loop {
             let mut buf = Vec::new();
@@ -317,7 +328,94 @@ mod tests {
     fn delimited(input: &[u8], delimiter: &[u8]) -> Vec<Vec<u8>> {
         match delimiter {
             &[b] => chunks(Byte(b), input),
-            multi => chunks(Bytes(multi), input),
+            multi => chunks(Bytes::new(multi), input),
+        }
+    }
+
+    // Independent oracle: leftmost non-overlapping chunking of the in-memory
+    // slice. Each chunk keeps its delimiter; the last may lack one.
+    fn naive_chunks(input: &[u8], delimiter: &[u8]) -> Vec<Vec<u8>> {
+        let mut chunks = Vec::new();
+        let mut rest = input;
+        while !rest.is_empty() {
+            match rest.windows(delimiter.len()).position(|w| w == delimiter) {
+                Some(i) => {
+                    let (chunk, tail) = rest.split_at(i + delimiter.len());
+                    chunks.push(chunk.to_vec());
+                    rest = tail;
+                }
+                None => {
+                    chunks.push(rest.to_vec());
+                    break;
+                }
+            }
+        }
+        chunks
+    }
+
+    // Overlapping-prefix needles (xyx, aaa), partial trailing delimiters,
+    // delimiter at the very start, input == delimiter, input shorter than the
+    // delimiter, empty input.
+    const ORACLE_CASES: &[(&[u8], &[u8])] = &[
+        (b"a|b|", b"||"),
+        (b"a|||b|", b"||"),
+        (b"aaaaaa", b"aaa"),
+        (b"aaaa", b"aaa"),
+        (b"aaaaa", b"aaa"),
+        (b"abcabc", b"abc"),
+        (b"xyxyxy", b"xyx"),
+        (b"a||b||c", b"||"),
+        (b"a||b|", b"||"),
+        (b"||a||", b"||"),
+        (b"||", b"||"),
+        (b"|", b"||"),
+        (b"", b"||"),
+        (b"\xaa\xff\xbb\xaa\xff\xcc", b"\xaa\xff"),
+        (b"xabcdabcdx", b"abcd"),
+    ];
+
+    #[test]
+    fn multibyte_chunks_match_naive_oracle() {
+        for &(input, delim) in ORACLE_CASES {
+            assert_eq!(
+                chunks(Bytes::new(delim), input),
+                naive_chunks(input, delim),
+                "chunks diverged from the naive oracle on {input:?} delim {delim:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn multibyte_chunks_match_naive_oracle_across_block_boundaries() {
+        // Capacities 1..=3 force every match to straddle fill_buf boundaries.
+        for &(input, delim) in ORACLE_CASES {
+            for capacity in 1..=3 {
+                assert_eq!(
+                    chunks_at(Bytes::new(delim), input, capacity),
+                    naive_chunks(input, delim),
+                    "chunks diverged from the naive oracle on {input:?} delim {delim:?} capacity {capacity}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn multibyte_skip_matches_naive_oracle_across_block_boundaries() {
+        // Skipping the first chunk must leave exactly the oracle's remainder,
+        // pinning skip's consumed byte count independently of read.
+        for &(input, delim) in ORACLE_CASES {
+            let expected: Vec<u8> = naive_chunks(input, delim)
+                .into_iter()
+                .skip(1)
+                .flatten()
+                .collect();
+            for capacity in 1..=3 {
+                assert_eq!(
+                    windowed(BytesRef(delim), input, 1, None, capacity),
+                    expected,
+                    "skip diverged from the naive oracle on {input:?} delim {delim:?} capacity {capacity}"
+                );
+            }
         }
     }
 
@@ -430,10 +528,10 @@ mod tests {
     struct BytesRef<'d>(&'d [u8]);
     impl Split for BytesRef<'_> {
         fn read<R: BufRead + ?Sized>(&self, r: &mut R, buf: &mut Vec<u8>) -> io::Result<usize> {
-            Bytes(self.0).read(r, buf)
+            Bytes::new(self.0).read(r, buf)
         }
         fn skip<R: BufRead + ?Sized>(&self, r: &mut R) -> io::Result<usize> {
-            Bytes(self.0).skip(r)
+            Bytes::new(self.0).skip(r)
         }
     }
 
@@ -482,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn skip_until_delim_overlap() {
+    fn multibyte_overlap() {
         // Skipping 1 chunk of `a|||b|` split on `||` yields the rest, `|b|`.
         assert_eq!(
             windowed(BytesRef(b"||"), b"a|||b|", 1, None, 8 * 1024),
@@ -496,9 +594,9 @@ mod tests {
     }
 
     #[test]
-    fn skip_until_delim_contiguous_repeat() {
-        // The tail must be cleared on a confirmed match: `aaaaaa` splits into
-        // `aaa`,`aaa`, so skipping one chunk leaves `aaa` (not `a`).
+    fn multibyte_contiguous_repeat() {
+        // A confirmed match must not seed the next chunk's match window:
+        // `aaaaaa` splits into `aaa`,`aaa`, so skipping one chunk leaves `aaa`.
         assert_eq!(
             windowed(BytesRef(b"aaa"), b"aaaaaa", 1, None, 8 * 1024),
             b"aaa"
@@ -512,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn skip_until_delim_straddle() {
+    fn multibyte_straddle() {
         // capacity 1 forces every delimiter to straddle a fill_buf boundary.
         for input in [
             &b"a||b||c||d||"[..],
@@ -539,8 +637,8 @@ mod tests {
     #[test]
     fn stepped_straddle() {
         // capacity 1 forces every delimiter to straddle a fill_buf boundary;
-        // stepping interleaves Bytes::skip's rolling tail with Bytes::read's
-        // buffered ends_with check on alternating chunks.
+        // stepping drives scan_until_delim's carry from both the skip and the
+        // read call sites on alternating chunks.
         for (input, delim) in [
             (&b"a||b||c||d||e"[..], &b"||"[..]),
             (&b"a|||b|"[..], &b"||"[..]),
@@ -568,15 +666,5 @@ mod tests {
             windowed(ByteRef(b'\n'), input, 1, None, 8 * 1024),
             b"slice\xaa"
         );
-    }
-
-    #[test]
-    fn ends_with_across_cases() {
-        assert!(!ends_with_across(b"", b"a|", b"||"));
-        assert!(ends_with_across(b"|", b"|", b"||"));
-        assert!(ends_with_across(b"xy", b"z", b"yz"));
-        assert!(!ends_with_across(b"", b"z", b"yz")); // under length
-                                                      // recent suffix matches the delimiter tail, but the tail prefix does not.
-        assert!(!ends_with_across(b"ay", b"z", b"xyz"));
     }
 }
