@@ -1,4 +1,8 @@
-use std::io::{self, BufRead, Write};
+use crate::ext::IteratorExt;
+use std::{
+    io::{self, BufRead, Write},
+    num::NonZeroUsize,
+};
 
 /// Scan to the first `delim` byte. `sink` receives each consumed slice; it is the
 /// only thing that differs between reading (copy into a buffer) and skipping
@@ -211,43 +215,6 @@ fn extend_tail(tail: &mut Vec<u8>, chunk: &[u8], keep: usize) {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct Chunks<S, B> {
-    split: S,
-    buf: B,
-}
-
-impl<S: Split, B: BufRead> Iterator for Chunks<S, B> {
-    type Item = io::Result<Vec<u8>>;
-
-    #[inline]
-    fn next(&mut self) -> Option<io::Result<Vec<u8>>> {
-        let mut buf = Vec::new();
-        match self.split.read(&mut self.buf, &mut buf) {
-            Ok(0) => None,
-            Ok(_n) => Some(Ok(buf)),
-            Err(e) => Some(Err(e)),
-        }
-    }
-}
-
-pub(crate) trait BufReadExt: BufRead + Sized {
-    #[inline]
-    fn lines_with_eol(self) -> Chunks<Byte, Self> {
-        Chunks {
-            split: Byte(b'\n'),
-            buf: self,
-        }
-    }
-
-    #[inline]
-    fn split_chunks<S: Split>(self, split: S) -> Chunks<S, Self> {
-        Chunks { split, buf: self }
-    }
-}
-
-impl<B: BufRead> BufReadExt for B {}
-
 /// Unit-step line/delimiter fast path. A unit-step range selects contiguous
 /// chunks, i.e. one contiguous byte span: skip `start` chunks, then emit the
 /// window. Unbounded `start:` copies the tail verbatim; bounded `start:end`
@@ -285,108 +252,133 @@ pub(crate) fn slice_window<S: Split, R: BufRead, W: Write>(
     output.flush()
 }
 
-#[cfg(test)]
-trait DelimitBy: BufRead + Sized + 'static {
-    /// Test-only convenience that routes a raw delimiter through the
-    /// `[] / &[b] / multi` shape match into `split_chunks`, so the existing
-    /// iterator round-trip tests keep pinning chunk boundaries.
-    fn delimit_by(self, delimiter: &[u8]) -> Box<dyn Iterator<Item = io::Result<Vec<u8>>>> {
-        match delimiter {
-            [] => Box::new(self.split_chunks(PerByte)),
-            &[b] => Box::new(self.split_chunks(Byte(b))),
-            multi => Box::new(self.split_chunks(Bytes(multi.to_vec().leak()))),
+/// Stepped (step > 1) line/delimiter path. The surviving chunk indices come
+/// from running `IteratorExt::slice` over the index stream itself, so the
+/// take(end).skip(start).step_by(step) ordering is inherited from the same
+/// adapter as every other mode rather than re-derived. Survivors are read into
+/// one reused buffer; the gaps between them are skipped without copying.
+/// Stops at end of stream or after the last selected index, so a bounded `end`
+/// never reads past its final selected chunk.
+pub(crate) fn slice_stepped<S: Split, R: BufRead, W: Write>(
+    split: S,
+    mut input: R,
+    mut output: W,
+    start: usize,
+    end: Option<usize>,
+    step: NonZeroUsize,
+) -> io::Result<()> {
+    let mut buf = Vec::new();
+    let mut index = 0usize;
+    'chunks: for target in (0usize..).slice(start, end, Some(step)) {
+        while index < target {
+            if split.skip(&mut input)? == 0 {
+                break 'chunks;
+            }
+            index += 1;
         }
+        buf.clear();
+        if split.read(&mut input, &mut buf)? == 0 {
+            break;
+        }
+        output.write_all(&buf)?;
+        index += 1;
     }
+    output.flush()
 }
-
-#[cfg(test)]
-impl<B: BufRead + 'static> DelimitBy for B {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ext::IteratorExt;
     use std::io::BufReader;
 
     #[test]
     fn empty_lines_with_eol() {
-        let mut lines = BufReader::new(&b""[..]).lines_with_eol();
-        assert!(lines.next().is_none());
+        assert!(chunks(Byte(b'\n'), b"").is_empty());
     }
 
     #[test]
     fn lines_with_eol() {
-        let mut lines = BufReader::new(&b"1\n2\n"[..]).lines_with_eol();
-        assert_eq!(b"1\n", lines.next().unwrap().unwrap().as_slice());
-        assert_eq!(b"2\n", lines.next().unwrap().unwrap().as_slice());
+        assert_eq!(chunks(Byte(b'\n'), b"1\n2\n"), [b"1\n", b"2\n"]);
     }
 
     #[test]
     fn lines_without_eol() {
-        let mut lines = BufReader::new(&b"1\n2"[..]).lines_with_eol();
-        assert_eq!(b"1\n", lines.next().unwrap().unwrap().as_slice());
-        assert_eq!(b"2", lines.next().unwrap().unwrap().as_slice());
+        assert_eq!(chunks(Byte(b'\n'), b"1\n2"), [&b"1\n"[..], b"2"]);
     }
 
     #[test]
     fn empty_delimit_by_empty() {
-        let mut delimited = BufReader::new(&b""[..]).delimit_by(&b""[..]);
-        assert!(delimited.next().is_none());
+        assert!(delimited(b"", b"").is_empty());
     }
 
     #[test]
     fn empty_delimit_by_character() {
-        let mut delimited = BufReader::new(&b""[..]).delimit_by(&b"|"[..]);
-        assert!(delimited.next().is_none());
+        assert!(delimited(b"", b"|").is_empty());
     }
 
     #[test]
     fn empty_delimit_by_string() {
-        let mut delimited = BufReader::new(&b""[..]).delimit_by(&b"||"[..]);
-        assert!(delimited.next().is_none());
+        assert!(delimited(b"", b"||").is_empty());
     }
 
     #[test]
     fn delimit_by_empty() {
-        let mut delimited = BufReader::new(&b"a|b|"[..]).delimit_by(&b""[..]);
-        assert_eq!(b"a", delimited.next().unwrap().unwrap().as_slice());
-        assert_eq!(b"|", delimited.next().unwrap().unwrap().as_slice());
-        assert_eq!(b"b", delimited.next().unwrap().unwrap().as_slice());
-        assert_eq!(b"|", delimited.next().unwrap().unwrap().as_slice());
+        assert_eq!(delimited(b"a|b|", b""), [b"a", b"|", b"b", b"|"]);
     }
 
     #[test]
     fn delimit_by_character() {
-        let mut delimited = BufReader::new(&b"a|b|"[..]).delimit_by(&b"|"[..]);
-        assert_eq!(b"a|", delimited.next().unwrap().unwrap().as_slice());
-        assert_eq!(b"b|", delimited.next().unwrap().unwrap().as_slice());
+        assert_eq!(delimited(b"a|b|", b"|"), [b"a|", b"b|"]);
     }
 
     #[test]
     fn delimit_by_string() {
-        let mut delimited = BufReader::new(&b"a|||b|"[..]).delimit_by(&b"||"[..]);
-        assert_eq!(b"a||", delimited.next().unwrap().unwrap().as_slice());
-        assert_eq!(b"|b|", delimited.next().unwrap().unwrap().as_slice());
+        assert_eq!(delimited(b"a|||b|", b"||"), [b"a||", b"|b|"]);
     }
 
     #[test]
     fn delimit_by_nul() {
-        let mut delimited = BufReader::new(&b"a\0b\0"[..]).delimit_by(&[0]);
-        assert_eq!(b"a\0", delimited.next().unwrap().unwrap().as_slice());
-        assert_eq!(b"b\0", delimited.next().unwrap().unwrap().as_slice());
+        assert_eq!(delimited(b"a\0b\0", &[0]), [b"a\0", b"b\0"]);
     }
 
-    // Reference: the chunks `split_chunks(split).slice(start, end, None)` would
-    // emit, concatenated. `slice_window` must reproduce this byte-for-byte.
-    fn reference<S: Split>(split: S, input: &[u8], start: usize, end: Option<usize>) -> Vec<u8> {
-        let mut out = Vec::new();
-        for chunk in BufReader::new(input)
-            .split_chunks(split)
-            .slice(start, end, None)
-        {
-            out.extend_from_slice(&chunk.unwrap());
+    // Every chunk the Split produces, in order — the materialized chunking spec.
+    fn chunks<S: Split>(split: S, input: &[u8]) -> Vec<Vec<u8>> {
+        let mut input = BufReader::new(input);
+        let mut chunks = Vec::new();
+        loop {
+            let mut buf = Vec::new();
+            if split.read(&mut input, &mut buf).unwrap() == 0 {
+                return chunks;
+            }
+            chunks.push(buf);
         }
-        out
+    }
+
+    // Mirrors the production `[] / &[b] / multi` delimiter-shape dispatch so
+    // the boundary pins below stay per-kind.
+    fn delimited(input: &[u8], delimiter: &[u8]) -> Vec<Vec<u8>> {
+        match delimiter {
+            [] => chunks(PerByte, input),
+            &[b] => chunks(Byte(b), input),
+            multi => chunks(Bytes(multi), input),
+        }
+    }
+
+    // Reference: the chunks `IteratorExt::slice` selects, concatenated.
+    // `slice_window` (step None) and `slice_stepped` must reproduce this
+    // byte-for-byte.
+    fn reference<S: Split>(
+        split: S,
+        input: &[u8],
+        start: usize,
+        end: Option<usize>,
+        step: Option<NonZeroUsize>,
+    ) -> Vec<u8> {
+        chunks(split, input)
+            .into_iter()
+            .slice(start, end, step)
+            .collect::<Vec<_>>()
+            .concat()
     }
 
     fn windowed<S: Split>(
@@ -409,6 +401,7 @@ mod tests {
     }
 
     const RANGES: &[(usize, Option<usize>)] = &[
+        (0, None),
         (1, None),
         (0, Some(1)),
         (1, Some(3)),
@@ -423,9 +416,45 @@ mod tests {
         for &(start, end) in RANGES {
             assert_eq!(
                 windowed(split, input, start, end, 8 * 1024),
-                reference(split, input, start, end),
+                reference(split, input, start, end, None),
                 "slice_window diverged from the iterator for {start}:{end:?} on {input:?}"
             );
+        }
+    }
+
+    const STEPS: &[usize] = &[1, 2, 3, 7];
+
+    fn stepped<S: Split>(
+        split: S,
+        input: &[u8],
+        start: usize,
+        end: Option<usize>,
+        step: NonZeroUsize,
+        capacity: usize,
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        slice_stepped(
+            split,
+            BufReader::with_capacity(capacity, input),
+            &mut out,
+            start,
+            end,
+            step,
+        )
+        .unwrap();
+        out
+    }
+
+    fn assert_stepped_parity<S: Split + Copy>(split: S, input: &[u8]) {
+        for &(start, end) in RANGES {
+            for &step in STEPS {
+                let step = NonZeroUsize::new(step).unwrap();
+                assert_eq!(
+                    stepped(split, input, start, end, step, 8 * 1024),
+                    reference(split, input, start, end, Some(step)),
+                    "slice_stepped diverged from the iterator for {start}:{end:?}:{step} on {input:?}"
+                );
+            }
         }
     }
 
@@ -490,6 +519,33 @@ mod tests {
     }
 
     #[test]
+    fn stepped_parity_line() {
+        assert_stepped_parity(ByteRef(b'\n'), b"a\nb\nc\nd\ne\n");
+        assert_stepped_parity(ByteRef(b'\n'), b"a\nb\nc"); // no trailing newline
+    }
+
+    #[test]
+    fn stepped_parity_comma() {
+        assert_stepped_parity(ByteRef(b','), b"a,b,c,d,e,");
+    }
+
+    #[test]
+    fn stepped_parity_nul() {
+        assert_stepped_parity(ByteRef(0), b"a\0b\0c\0d\0");
+    }
+
+    #[test]
+    fn stepped_parity_multibyte() {
+        assert_stepped_parity(BytesRef(b"||"), b"a||b||c||d||");
+        assert_stepped_parity(BytesRef(b"||"), b"a||b||c"); // no trailing delimiter
+    }
+
+    #[test]
+    fn stepped_parity_per_byte() {
+        assert_stepped_parity(PerByteRef, b"abcdef");
+    }
+
+    #[test]
     fn skip_until_delim_overlap() {
         // Skipping 1 chunk of `a|||b|` split on `||` yields the rest, `|b|`.
         assert_eq!(
@@ -537,9 +593,33 @@ mod tests {
                 };
                 assert_eq!(
                     windowed(BytesRef(delim), input, start, end, 1),
-                    reference(BytesRef(delim), input, start, end),
+                    reference(BytesRef(delim), input, start, end, None),
                     "straddle diverged for {start}:{end:?} on {input:?} delim {delim:?}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn stepped_straddle() {
+        // capacity 1 forces every delimiter to straddle a fill_buf boundary;
+        // stepping interleaves Bytes::skip's rolling tail with Bytes::read's
+        // buffered ends_with check on alternating chunks.
+        for (input, delim) in [
+            (&b"a||b||c||d||e"[..], &b"||"[..]),
+            (&b"a|||b|"[..], &b"||"[..]),
+            (&b"aaaaaa"[..], &b"aaa"[..]),
+            (&b"aaaa"[..], &b"aaa"[..]),
+        ] {
+            for &(start, end) in RANGES {
+                for &step in STEPS {
+                    let step = NonZeroUsize::new(step).unwrap();
+                    assert_eq!(
+                        stepped(BytesRef(delim), input, start, end, step, 1),
+                        reference(BytesRef(delim), input, start, end, Some(step)),
+                        "stepped straddle diverged for {start}:{end:?}:{step} on {input:?} delim {delim:?}"
+                    );
+                }
             }
         }
     }
