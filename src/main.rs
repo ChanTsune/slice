@@ -69,7 +69,7 @@ fn delimit_window<R: BufRead, W: Write>(
     debug_assert!(!delimiter.is_empty(), "empty delimiter is byte mode");
     match delimiter {
         &[b] => slice_window(Byte(b), input, output, start, end),
-        multi => slice_window(Bytes(multi), input, output, start, end),
+        multi => slice_window(Bytes::new(multi), input, output, start, end),
     }
 }
 
@@ -85,7 +85,7 @@ fn delimit_stepped<R: BufRead, W: Write>(
     debug_assert!(!delimiter.is_empty(), "empty delimiter is byte mode");
     match delimiter {
         &[b] => slice_stepped(Byte(b), input, output, start, end, step),
-        multi => slice_stepped(Bytes(multi), input, output, start, end, step),
+        multi => slice_stepped(Bytes::new(multi), input, output, start, end, step),
     }
 }
 
