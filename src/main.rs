@@ -187,13 +187,20 @@ fn copy_mode<R: BufRead, W: Write>(mut input: R, mut output: W) -> io::Result<()
 }
 
 #[inline]
-fn apply<R, W, S>(mode: &SliceMode, input: R, output: W, plan: SlicePlan, skip: S) -> io::Result<()>
+fn apply<R, W, S>(
+    mode: &SliceMode,
+    input: R,
+    mut output: W,
+    plan: SlicePlan,
+    skip: S,
+) -> io::Result<()>
 where
     R: BufRead,
     W: Write,
     S: Fn(&mut R, u64) -> io::Result<()>,
 {
     match plan {
+        SlicePlan::Empty => output.flush(),
         SlicePlan::Copy => copy_mode(input, output),
         SlicePlan::Window { start, end } => match mode {
             SliceMode::Lines => slice_window(Byte(b'\n'), input, output, start, end),
@@ -913,6 +920,65 @@ mod tests {
             assert_eq!(agree(b"||", b"a||b||c\n", "1:"), b"b||c\n"); // multi-byte
             assert_eq!(agree(b",", b"a,b,c,", "1:"), b"b,c,"); // single-byte
             assert_eq!(agree(b"", b"abcdef", "1:4"), b"bcd"); // empty (PerByte)
+        }
+    }
+
+    mod empty_plan {
+        use super::*;
+
+        // Any read attempt fails, so a passing test proves the Empty plan never
+        // touched the input.
+        struct NoReadReader;
+
+        impl Read for NoReadReader {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("input must not be read"))
+            }
+        }
+
+        impl BufRead for NoReadReader {
+            fn fill_buf(&mut self) -> io::Result<&[u8]> {
+                Err(io::Error::other("input must not be read"))
+            }
+            fn consume(&mut self, _amt: usize) {
+                panic!("input must not be consumed");
+            }
+        }
+
+        fn applied(mode: SliceMode, range: &str) -> Vec<u8> {
+            let mut out = Vec::new();
+            apply(
+                &mode,
+                NoReadReader,
+                &mut out,
+                SliceRange::from_str(range).unwrap().plan(),
+                discard,
+            )
+            .expect("an empty plan must succeed without reading input");
+            out
+        }
+
+        #[test]
+        fn lines_emit_nothing_without_reading() {
+            assert_eq!(applied(SliceMode::Lines, "5:3"), b"");
+            assert_eq!(applied(SliceMode::Lines, ":0"), b"");
+        }
+
+        #[test]
+        fn bytes_emit_nothing_without_reading() {
+            assert_eq!(applied(SliceMode::Bytes, "5:3"), b"");
+            assert_eq!(applied(SliceMode::Bytes, "5:5"), b"");
+        }
+
+        #[test]
+        fn custom_delimiter_emits_nothing_without_reading() {
+            assert_eq!(applied(SliceMode::Custom(b",".as_slice()), "5:5"), b"");
+        }
+
+        #[test]
+        fn stepped_empty_range_emits_nothing_without_reading() {
+            assert_eq!(applied(SliceMode::Lines, "5:3:2"), b"");
+            assert_eq!(applied(SliceMode::Bytes, "5:3:2"), b"");
         }
     }
 
