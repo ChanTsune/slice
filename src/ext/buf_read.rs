@@ -70,9 +70,6 @@ pub(crate) struct Byte(pub u8);
 /// delimiter-shape dispatch).
 pub(crate) struct Bytes<'d>(pub &'d [u8]);
 
-/// Empty delimiter: one byte per chunk.
-pub(crate) struct PerByte;
-
 impl Split for Byte {
     #[inline]
     fn read<R: BufRead + ?Sized>(&self, r: &mut R, buf: &mut Vec<u8>) -> io::Result<usize> {
@@ -81,35 +78,6 @@ impl Split for Byte {
     #[inline]
     fn skip<R: BufRead + ?Sized>(&self, r: &mut R) -> io::Result<usize> {
         skip_until(r, self.0)
-    }
-}
-
-impl Split for PerByte {
-    #[inline]
-    fn read<R: BufRead + ?Sized>(&self, r: &mut R, buf: &mut Vec<u8>) -> io::Result<usize> {
-        let mut byte = [0; 1];
-        match r.read(&mut byte)? {
-            0 => Ok(0),
-            n => {
-                buf.extend_from_slice(&byte[..n]);
-                Ok(n)
-            }
-        }
-    }
-    #[inline]
-    fn skip<R: BufRead + ?Sized>(&self, r: &mut R) -> io::Result<usize> {
-        loop {
-            let available = match r.fill_buf() {
-                Ok(n) => n,
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
-            };
-            if available.is_empty() {
-                return Ok(0);
-            }
-            r.consume(1);
-            return Ok(1);
-        }
     }
 }
 
@@ -307,11 +275,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_delimit_by_empty() {
-        assert!(delimited(b"", b"").is_empty());
-    }
-
-    #[test]
     fn empty_delimit_by_character() {
         assert!(delimited(b"", b"|").is_empty());
     }
@@ -319,11 +282,6 @@ mod tests {
     #[test]
     fn empty_delimit_by_string() {
         assert!(delimited(b"", b"||").is_empty());
-    }
-
-    #[test]
-    fn delimit_by_empty() {
-        assert_eq!(delimited(b"a|b|", b""), [b"a", b"|", b"b", b"|"]);
     }
 
     #[test]
@@ -354,11 +312,10 @@ mod tests {
         }
     }
 
-    // Mirrors the production `[] / &[b] / multi` delimiter-shape dispatch so
-    // the boundary pins below stay per-kind.
+    // Mirrors the production `&[b] / multi` delimiter-shape dispatch so the
+    // boundary pins below stay per-kind.
     fn delimited(input: &[u8], delimiter: &[u8]) -> Vec<Vec<u8>> {
         match delimiter {
-            [] => chunks(PerByte, input),
             &[b] => chunks(Byte(b), input),
             multi => chunks(Bytes(multi), input),
         }
@@ -480,17 +437,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Copy)]
-    struct PerByteRef;
-    impl Split for PerByteRef {
-        fn read<R: BufRead + ?Sized>(&self, r: &mut R, buf: &mut Vec<u8>) -> io::Result<usize> {
-            PerByte.read(r, buf)
-        }
-        fn skip<R: BufRead + ?Sized>(&self, r: &mut R) -> io::Result<usize> {
-            PerByte.skip(r)
-        }
-    }
-
     #[test]
     fn skip_parity_line() {
         assert_skip_parity(ByteRef(b'\n'), b"a\nb\nc\nd\ne\n");
@@ -514,11 +460,6 @@ mod tests {
     }
 
     #[test]
-    fn skip_parity_per_byte() {
-        assert_skip_parity(PerByteRef, b"abcdef");
-    }
-
-    #[test]
     fn stepped_parity_line() {
         assert_stepped_parity(ByteRef(b'\n'), b"a\nb\nc\nd\ne\n");
         assert_stepped_parity(ByteRef(b'\n'), b"a\nb\nc"); // no trailing newline
@@ -538,11 +479,6 @@ mod tests {
     fn stepped_parity_multibyte() {
         assert_stepped_parity(BytesRef(b"||"), b"a||b||c||d||");
         assert_stepped_parity(BytesRef(b"||"), b"a||b||c"); // no trailing delimiter
-    }
-
-    #[test]
-    fn stepped_parity_per_byte() {
-        assert_stepped_parity(PerByteRef, b"abcdef");
     }
 
     #[test]
