@@ -46,21 +46,42 @@ pub(crate) enum ParseSliceRangeError {
     TooManyParts,
 }
 
-impl SliceRange {
-    /// True when `step` is `None` or `1`: every element survives in order, so a
-    /// contiguous copy reproduces the stepped iterator. `is_identity` is the
-    /// `start == 0 && end == None` special case of this.
-    #[inline]
-    pub(crate) fn is_unit_step(&self) -> bool {
-        self.step.is_none_or(|step| step.get() == 1)
-    }
+/// How a parsed range executes. `SliceRange` stays the `start:end:step` as
+/// written; classifying it once lets dispatch match on the processing shape
+/// instead of re-testing field combinations at every branch.
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+pub(crate) enum SlicePlan {
+    /// Selects the whole input unchanged (`:`, `::`, `0::1`): the output equals
+    /// the input byte-for-byte in every mode, so splitting can be skipped in
+    /// favor of a verbatim copy.
+    Copy,
+    /// Unit step with an offset or bound: the selected elements are contiguous,
+    /// so the output is the single span `[start, end)`.
+    Window { start: usize, end: Option<usize> },
+    /// `step > 1` selects non-contiguous elements; only the element-by-element
+    /// pipeline can express it.
+    Stepped {
+        start: usize,
+        end: Option<usize>,
+        step: NonZeroUsize,
+    },
+}
 
-    /// True when the range selects the whole input unchanged (`:`, `::`, `0::1`):
-    /// the output then equals the input byte-for-byte in every mode, so the
-    /// splitting pipeline can be skipped in favor of a verbatim copy.
+impl SliceRange {
     #[inline]
-    pub(crate) fn is_identity(&self) -> bool {
-        self.start == 0 && self.end.is_none() && self.is_unit_step()
+    pub(crate) fn plan(&self) -> SlicePlan {
+        match self.step {
+            Some(step) if step.get() > 1 => SlicePlan::Stepped {
+                start: self.start,
+                end: self.end,
+                step,
+            },
+            _ if self.start == 0 && self.end.is_none() => SlicePlan::Copy,
+            _ => SlicePlan::Window {
+                start: self.start,
+                end: self.end,
+            },
+        }
     }
 
     /// Render a human-readable description of what this resolved range selects,
@@ -313,33 +334,45 @@ mod tests {
     }
 
     #[test]
-    fn is_identity_recognizes_whole_input_ranges() {
+    fn plan_copies_whole_input_ranges() {
         for whole in [":", "::", "0:", "0::", "::1", "0::1"] {
-            assert!(
-                SliceRange::from_str(whole).unwrap().is_identity(),
+            assert_eq!(
+                SliceRange::from_str(whole).unwrap().plan(),
+                SlicePlan::Copy,
                 "{whole} should select the whole input"
-            );
-        }
-        for sliced in ["1:", ":1", "::2", "0:5", "1::1", "5:+-10"] {
-            assert!(
-                !SliceRange::from_str(sliced).unwrap().is_identity(),
-                "{sliced} must not be treated as identity"
             );
         }
     }
 
     #[test]
-    fn is_unit_step_recognizes_none_or_one_step() {
-        for unit in [":", "::", "0::1", "10:", "5:15", ":15", "1:+3"] {
-            assert!(
-                SliceRange::from_str(unit).unwrap().is_unit_step(),
-                "{unit} should be unit step"
+    fn plan_windows_contiguous_subranges() {
+        for (range, start, end) in [
+            ("1:", 1, None),
+            (":1", 0, Some(1)),
+            ("5:15", 5, Some(15)),
+            ("1::1", 1, None),
+            ("1:+3", 1, Some(4)),
+            ("5:+-10", 0, Some(15)),
+        ] {
+            assert_eq!(
+                SliceRange::from_str(range).unwrap().plan(),
+                SlicePlan::Window { start, end },
+                "{range} should be a contiguous window"
             );
         }
-        for stepped in ["::2", "::6", "1:8:2"] {
-            assert!(
-                !SliceRange::from_str(stepped).unwrap().is_unit_step(),
-                "{stepped} must not be treated as unit step"
+    }
+
+    #[test]
+    fn plan_steps_non_contiguous_selections() {
+        for (range, start, end, step) in [("::2", 0, None, 2), ("1:8:2", 1, Some(8), 2)] {
+            assert_eq!(
+                SliceRange::from_str(range).unwrap().plan(),
+                SlicePlan::Stepped {
+                    start,
+                    end,
+                    step: NonZeroUsize::new(step).unwrap()
+                },
+                "{range} must stay on the stepped pipeline"
             );
         }
     }

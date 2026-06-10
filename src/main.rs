@@ -6,12 +6,13 @@ mod range;
 
 use crate::{
     ext::{slice_window, BufReadExt, Byte, Bytes, IteratorExt, PerByte, Split},
-    range::SliceRange,
+    range::{SlicePlan, SliceRange},
 };
 use clap::{CommandFactory, Parser};
 use std::{
     fs,
     io::{self, stdin, stdout, BufRead, Read, Seek, SeekFrom, Write},
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -41,11 +42,14 @@ fn buf_writer<W: Write>(writer: W, capacity: Option<usize>) -> io::BufWriter<W> 
 }
 
 #[inline]
-fn line_mode<R: BufRead, W: Write>(input: R, mut output: W, range: &SliceRange) -> io::Result<()> {
-    for line in input
-        .lines_with_eol()
-        .slice(range.start, range.end, range.step)
-    {
+fn line_mode<R: BufRead, W: Write>(
+    input: R,
+    mut output: W,
+    start: usize,
+    end: Option<usize>,
+    step: NonZeroUsize,
+) -> io::Result<()> {
+    for line in input.lines_with_eol().slice(start, end, Some(step)) {
         output.write_all(&line?)?;
     }
     output.flush()
@@ -56,26 +60,27 @@ fn delimit_mode<R: BufRead, W: Write>(
     input: R,
     output: W,
     delimiter: &[u8],
-    range: &SliceRange,
+    start: usize,
+    end: Option<usize>,
+    step: NonZeroUsize,
 ) -> io::Result<()> {
     fn run<S: Split, R: BufRead, W: Write>(
         split: S,
         input: R,
         mut output: W,
-        range: &SliceRange,
+        start: usize,
+        end: Option<usize>,
+        step: NonZeroUsize,
     ) -> io::Result<()> {
-        for part in input
-            .split_chunks(split)
-            .slice(range.start, range.end, range.step)
-        {
+        for part in input.split_chunks(split).slice(start, end, Some(step)) {
             output.write_all(&part?)?;
         }
         output.flush()
     }
     match delimiter {
-        [] => run(PerByte, input, output, range),
-        &[b] => run(Byte(b), input, output, range),
-        multi => run(Bytes(multi), input, output, range),
+        [] => run(PerByte, input, output, start, end, step),
+        &[b] => run(Byte(b), input, output, start, end, step),
+        multi => run(Bytes(multi), input, output, start, end, step),
     }
 }
 
@@ -84,18 +89,25 @@ fn delimit_window<R: BufRead, W: Write>(
     input: R,
     output: W,
     delimiter: &[u8],
-    range: &SliceRange,
+    start: usize,
+    end: Option<usize>,
 ) -> io::Result<()> {
     match delimiter {
-        [] => slice_window(PerByte, input, output, range.start, range.end),
-        &[b] => slice_window(Byte(b), input, output, range.start, range.end),
-        multi => slice_window(Bytes(multi), input, output, range.start, range.end),
+        [] => slice_window(PerByte, input, output, start, end),
+        &[b] => slice_window(Byte(b), input, output, start, end),
+        multi => slice_window(Bytes(multi), input, output, start, end),
     }
 }
 
 #[inline]
-fn byte_mode<R: BufRead, W: Write>(input: R, mut output: W, range: &SliceRange) -> io::Result<()> {
-    for byte in input.bytes().slice(range.start, range.end, range.step) {
+fn byte_mode<R: BufRead, W: Write>(
+    input: R,
+    mut output: W,
+    start: usize,
+    end: Option<usize>,
+    step: NonZeroUsize,
+) -> io::Result<()> {
+    for byte in input.bytes().slice(start, end, Some(step)) {
         output.write_all(&[byte?])?;
     }
     output.flush()
@@ -166,43 +178,26 @@ fn copy_mode<R: BufRead, W: Write>(mut input: R, mut output: W) -> io::Result<()
 }
 
 #[inline]
-fn apply<R, W, S>(
-    mode: &SliceMode,
-    input: R,
-    output: W,
-    range: &SliceRange,
-    skip: S,
-) -> io::Result<()>
+fn apply<R, W, S>(mode: &SliceMode, input: R, output: W, plan: SlicePlan, skip: S) -> io::Result<()>
 where
     R: BufRead,
     W: Write,
     S: Fn(&mut R, u64) -> io::Result<()>,
 {
-    if range.is_identity() {
-        return copy_mode(input, output);
-    }
-    match mode {
-        SliceMode::Lines => {
-            if range.is_unit_step() {
-                slice_window(Byte(b'\n'), input, output, range.start, range.end)
-            } else {
-                line_mode(input, output, range)
+    match plan {
+        SlicePlan::Copy => copy_mode(input, output),
+        SlicePlan::Window { start, end } => match mode {
+            SliceMode::Lines => slice_window(Byte(b'\n'), input, output, start, end),
+            SliceMode::Bytes => byte_window(input, output, start, end, skip),
+            SliceMode::Custom(delimiter) => delimit_window(input, output, delimiter, start, end),
+        },
+        SlicePlan::Stepped { start, end, step } => match mode {
+            SliceMode::Lines => line_mode(input, output, start, end, step),
+            SliceMode::Bytes => byte_mode(input, output, start, end, step),
+            SliceMode::Custom(delimiter) => {
+                delimit_mode(input, output, delimiter, start, end, step)
             }
-        }
-        SliceMode::Bytes => {
-            if range.is_unit_step() {
-                byte_window(input, output, range.start, range.end, skip)
-            } else {
-                byte_mode(input, output, range)
-            }
-        }
-        SliceMode::Custom(delimiter) => {
-            if range.is_unit_step() {
-                delimit_window(input, output, delimiter, range)
-            } else {
-                delimit_mode(input, output, delimiter, range)
-            }
-        }
+        },
     }
 }
 
@@ -295,10 +290,11 @@ fn entry(args: cli::Args) -> bool {
     } else {
         SliceMode::Lines
     };
+    let plan = range.plan();
     if args.files.is_empty() {
         let input = buf_reader(stdin().lock(), io_buffer_size);
         let output = buf_writer(stdout().lock(), io_buffer_size);
-        let result = apply(&mode, input, output, &range, discard);
+        let result = apply(&mode, input, output, plan, discard);
         stdout_status(result)
     } else {
         // A single file never gets a header, so -q only matters for 2+ files.
@@ -314,7 +310,7 @@ fn entry(args: cli::Args) -> bool {
                     &mode,
                     input,
                     output,
-                    &range,
+                    plan,
                     |r: &mut io::BufReader<fs::File>, n| r.seek(SeekFrom::Start(n)).map(drop),
                 )
             },
@@ -338,181 +334,99 @@ mod tests {
     mod line {
         use super::*;
 
-        #[test]
-        fn empty() {
+        fn lined(input: &[u8], range: &str) -> Vec<u8> {
+            let range = SliceRange::from_str(range).unwrap();
             let mut out = Vec::new();
             line_mode(
-                b"".as_slice(),
+                input,
                 &mut out,
-                &SliceRange::from_str("::").unwrap(),
+                range.start,
+                range.end,
+                range.step.unwrap_or(NonZeroUsize::MIN),
             )
             .expect("");
+            out
+        }
 
-            assert_eq!(out, b"");
+        #[test]
+        fn empty() {
+            assert_eq!(lined(b"", "::"), b"");
         }
 
         mod one_line {
             use super::*;
 
+            const INPUT: &[u8] = b"slice command is simple string slicing command.\n";
+
             #[test]
             fn no_slice() {
-                let mut out = Vec::new();
-                line_mode(
-                    b"slice command is simple string slicing command.\n".as_slice(),
-                    &mut out,
-                    &SliceRange::from_str("::").unwrap(),
-                )
-                .expect("");
-
-                assert_eq!(out, b"slice command is simple string slicing command.\n");
+                assert_eq!(lined(INPUT, "::"), INPUT);
             }
 
             #[test]
             fn skip_first() {
-                let mut out = Vec::new();
-                line_mode(
-                    b"slice command is simple string slicing command.\n".as_slice(),
-                    &mut out,
-                    &SliceRange::from_str("1:").unwrap(),
-                )
-                .expect("");
-
-                assert_eq!(out, b"");
+                assert_eq!(lined(INPUT, "1:"), b"");
             }
 
             #[test]
             fn skip_over_input() {
-                let mut out = Vec::new();
-                line_mode(
-                    b"slice command is simple string slicing command.\n".as_slice(),
-                    &mut out,
-                    &SliceRange::from_str("2:").unwrap(),
-                )
-                .expect("");
-
-                assert_eq!(out, b"");
+                assert_eq!(lined(INPUT, "2:"), b"");
             }
 
             #[test]
             fn drop_tail() {
-                let mut out = Vec::new();
-                line_mode(
-                    b"slice command is simple string slicing command.\n".as_slice(),
-                    &mut out,
-                    &SliceRange::from_str(":0").unwrap(),
-                )
-                .expect("");
-
-                assert_eq!(out, b"");
+                assert_eq!(lined(INPUT, ":0"), b"");
             }
 
             #[test]
             fn step_two_slice() {
-                let mut out = Vec::new();
-                line_mode(
-                    b"slice command is simple string slicing command.\n".as_slice(),
-                    &mut out,
-                    &SliceRange::from_str("::2").unwrap(),
-                )
-                .expect("");
-
-                assert_eq!(out, b"slice command is simple string slicing command.\n");
+                assert_eq!(lined(INPUT, "::2"), INPUT);
             }
         }
 
         mod multi_line {
             use super::*;
 
+            const INPUT: &[u8] =
+                b"slice command is simple string slicing command.\nLike a python slice syntax.\n";
+
             #[test]
             fn no_slice() {
-                let mut out = Vec::new();
-                line_mode(
-                    b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
-                        .as_slice(),
-                    &mut out,
-                    &SliceRange::from_str("::").unwrap(),
-                )
-                    .expect("");
-
-                assert_eq!(
-                    out,
-                    b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
-                );
+                assert_eq!(lined(INPUT, "::"), INPUT);
             }
 
             #[test]
             fn skip_first() {
-                let mut out = Vec::new();
-                line_mode(
-                    b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
-                        .as_slice(),
-                    &mut out,
-                    &SliceRange::from_str("1:").unwrap(),
-                )
-                    .expect("");
-
-                assert_eq!(out, b"Like a python slice syntax.\n");
+                assert_eq!(lined(INPUT, "1:"), b"Like a python slice syntax.\n");
             }
 
             #[test]
             fn drop_last() {
-                let mut out = Vec::new();
-                line_mode(
-                    b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
-                        .as_slice(),
-                    &mut out,
-                    &SliceRange::from_str(":1").unwrap(),
-                )
-                    .expect("");
-
-                assert_eq!(out, b"slice command is simple string slicing command.\n");
+                assert_eq!(
+                    lined(INPUT, ":1"),
+                    b"slice command is simple string slicing command.\n"
+                );
             }
 
             #[test]
             fn step_two_slice() {
-                let mut out = Vec::new();
-                line_mode(
-                    b"slice command is simple string slicing command.\nLike a python slice syntax.\n".repeat(5)
-                        .as_slice(),
-                    &mut out,
-                    &SliceRange::from_str("::2").unwrap(),
-                )
-                    .expect("");
-
                 assert_eq!(
-                    out,
+                    lined(&INPUT.repeat(5), "::2"),
                     b"slice command is simple string slicing command.\n".repeat(5)
                 );
             }
 
             #[test]
             fn without_linebreak() {
-                let mut out = Vec::new();
-                line_mode(
-                    b"slice command is simple string slicing command.\nLike a python slice syntax."
-                        .as_slice(),
-                    &mut out,
-                    &SliceRange::from_str("::").unwrap(),
-                )
-                .expect("");
-
-                assert_eq!(
-                    out,
-                    b"slice command is simple string slicing command.\nLike a python slice syntax."
-                );
+                let input =
+                    b"slice command is simple string slicing command.\nLike a python slice syntax.";
+                assert_eq!(lined(input, "::"), input);
             }
 
             #[test]
             fn binary_stream() {
-                let mut out = Vec::new();
-                line_mode(
-                    b"slice\xaabinary stream\nslice binary\xaastream".as_slice(),
-                    &mut out,
-                    &SliceRange::from_str("::").unwrap(),
-                )
-                .expect("");
-
-                assert_eq!(out, b"slice\xaabinary stream\nslice binary\xaastream");
+                let input = b"slice\xaabinary stream\nslice binary\xaastream";
+                assert_eq!(lined(input, "::"), input);
             }
         }
     }
@@ -606,7 +520,7 @@ mod tests {
                 BrokenPipeWriter,
                 io::BufReader::new,
                 false,
-                |input, output| line_mode(input, output, &SliceRange::from_str("::").unwrap()),
+                |input, output| line_mode(input, output, 0, None, NonZeroUsize::MIN),
             );
             fs::remove_file(&file).ok();
 
@@ -639,7 +553,7 @@ mod tests {
                 BrokenPipeWriter,
                 io::BufReader::new,
                 false,
-                |input, output| line_mode(input, output, &SliceRange::from_str("::").unwrap()),
+                |input, output| line_mode(input, output, 0, None, NonZeroUsize::MIN),
             );
             fs::remove_file(&readable).ok();
 
@@ -689,93 +603,57 @@ mod tests {
     mod byte {
         use super::*;
 
-        #[test]
-        fn empty() {
+        const INPUT: &[u8] =
+            b"slice command is simple string slicing command.\nLike a python slice syntax.\n";
+
+        fn byted(input: &[u8], range: &str) -> Vec<u8> {
+            let range = SliceRange::from_str(range).unwrap();
             let mut out = Vec::new();
             byte_mode(
-                b"".as_slice(),
+                input,
                 &mut out,
-                &SliceRange::from_str("::").unwrap(),
+                range.start,
+                range.end,
+                range.step.unwrap_or(NonZeroUsize::MIN),
             )
             .expect("");
+            out
+        }
 
-            assert_eq!(out, b"");
+        #[test]
+        fn empty() {
+            assert_eq!(byted(b"", "::"), b"");
         }
 
         #[test]
         fn no_slice() {
-            let mut out = Vec::new();
-            byte_mode(
-                b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
-                    .as_slice(),
-                &mut out,
-                &SliceRange::from_str("::").unwrap(),
-            )
-            .expect("");
-
-            assert_eq!(
-                out,
-                b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
-            );
+            assert_eq!(byted(INPUT, "::"), INPUT);
         }
 
         #[test]
         fn skip_first() {
-            let mut out = Vec::new();
-            byte_mode(
-                b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
-                    .as_slice(),
-                &mut out,
-                &SliceRange::from_str("10:").unwrap(),
-            )
-            .expect("");
-
             assert_eq!(
-                out,
+                byted(INPUT, "10:"),
                 b"and is simple string slicing command.\nLike a python slice syntax.\n"
             );
         }
 
         #[test]
         fn drop_last() {
-            let mut out = Vec::new();
-            byte_mode(
-                b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
-                    .as_slice(),
-                &mut out,
-                &SliceRange::from_str(":15").unwrap(),
-            )
-            .expect("");
-
-            assert_eq!(out, b"slice command i");
+            assert_eq!(byted(INPUT, ":15"), b"slice command i");
         }
 
         #[test]
         fn skip_first_and_drop_last() {
-            let mut out = Vec::new();
-            byte_mode(
-                b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
-                    .as_slice(),
-                &mut out,
-                &SliceRange::from_str("5:15").unwrap(),
-            )
-            .expect("");
-
-            assert_eq!(out, b" command i");
+            assert_eq!(byted(INPUT, "5:15"), b" command i");
         }
 
         #[test]
         fn skip_two_slice() {
-            let mut out = Vec::new();
-            byte_mode(
-                b"slice command is simple string slicing command.\nLike a python slice syntax.\n"
-                    .as_slice(),
-                &mut out,
-                &SliceRange::from_str("::2").unwrap(),
-            )
-            .expect("");
-
-            assert_eq!(out, b"siecmadi ipesrn lcn omn.Lk  yhnsiesna.");
+            assert_eq!(
+                byted(INPUT, "::2"),
+                b"siecmadi ipesrn lcn omn.Lk  yhnsiesna."
+            );
         }
     }
 
@@ -935,7 +813,7 @@ mod tests {
                 &mode,
                 INPUT,
                 &mut out,
-                &SliceRange::from_str(range).unwrap(),
+                SliceRange::from_str(range).unwrap().plan(),
                 discard,
             )
             .expect("");
@@ -974,7 +852,7 @@ mod tests {
                 &SliceMode::Lines,
                 b"a\nb\nc\n".as_slice(),
                 &mut out,
-                &SliceRange::from_str("1:").unwrap(),
+                SliceRange::from_str("1:").unwrap().plan(),
                 discard,
             )
             .expect("");
@@ -992,12 +870,20 @@ mod tests {
                     &SliceMode::Custom(delimiter),
                     input,
                     &mut via_apply,
-                    &range,
+                    range.plan(),
                     discard,
                 )
                 .expect("");
                 let mut via_iter = Vec::new();
-                delimit_mode(input, &mut via_iter, delimiter, &range).expect("");
+                delimit_mode(
+                    input,
+                    &mut via_iter,
+                    delimiter,
+                    range.start,
+                    range.end,
+                    range.step.unwrap_or(NonZeroUsize::MIN),
+                )
+                .expect("");
                 assert_eq!(
                     via_apply, via_iter,
                     "apply vs delimit_mode for {delimiter:?} {range:?}"
