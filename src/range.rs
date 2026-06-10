@@ -77,7 +77,7 @@ impl SliceRange {
         out.push('\n');
 
         // 1-based human positions ("Nth line").
-        let first_pos = self.start + 1;
+        let first_pos = self.start.saturating_add(1);
         match self.end {
             None => {
                 if step == 1 {
@@ -388,6 +388,17 @@ mod tests {
             let text = SliceRange::from_str("5:5").unwrap().explain("line");
             assert!(text.contains("empty"));
             assert!(text.contains("count: 0"));
+        }
+
+        #[test]
+        fn max_start_saturates_first_position() {
+            let range = SliceRange {
+                start: usize::MAX,
+                end: None,
+                step: None,
+            };
+            let text = range.explain("line");
+            assert!(text.contains("from the 18446744073709551615th line"));
         }
 
         #[test]
