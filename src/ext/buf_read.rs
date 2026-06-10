@@ -21,6 +21,7 @@ fn scan_until<R: BufRead + ?Sized>(
     loop {
         let (done, used) = {
             let available = match r.fill_buf() {
+                Ok([]) => return Ok(read),
                 Ok(n) => n,
                 Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
@@ -38,7 +39,7 @@ fn scan_until<R: BufRead + ?Sized>(
         };
         r.consume(used);
         read += used;
-        if done || used == 0 {
+        if done {
             return Ok(read);
         }
     }
@@ -133,13 +134,11 @@ impl Split for Byte {
         loop {
             let (used, found) = {
                 let block = match r.fill_buf() {
+                    Ok([]) => return Ok(skipped + fragment as usize),
                     Ok(b) => b,
                     Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
                     Err(e) => return Err(e),
                 };
-                if block.is_empty() {
-                    return Ok(skipped + fragment as usize);
-                }
                 let mut found = 0;
                 let mut last_end = 0;
                 for i in memchr::memchr_iter(self.0, block) {
@@ -208,13 +207,11 @@ fn scan_until_delim<R: BufRead + ?Sized>(
     loop {
         let (done, used) = {
             let block = match r.fill_buf() {
+                Ok([]) => return Ok(read),
                 Ok(n) => n,
                 Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
             };
-            if block.is_empty() {
-                return Ok(read);
-            }
             let straddle = if carry.is_empty() {
                 None
             } else {

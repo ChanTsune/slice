@@ -112,13 +112,11 @@ fn byte_mode<R: BufRead, W: Write>(
     let mut phase = 0;
     loop {
         let block = match input.fill_buf() {
+            Ok([]) => break,
             Ok(block) => block,
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(err) => return Err(err),
         };
-        if block.is_empty() {
-            break;
-        }
         let limit = match remaining {
             Some(remaining) => block.len().min(remaining),
             None => block.len(),
@@ -152,13 +150,11 @@ fn discard<R: BufRead>(reader: &mut R, mut n: u64) -> io::Result<()> {
     while n > 0 {
         let consumed = {
             let buf = match reader.fill_buf() {
+                Ok([]) => break,
                 Ok(buf) => buf,
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Err(err) => return Err(err),
             };
-            if buf.is_empty() {
-                break;
-            }
             buf.len().min(n as usize)
         };
         reader.consume(consumed);
