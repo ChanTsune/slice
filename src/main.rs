@@ -5,7 +5,7 @@ mod ext;
 mod range;
 
 use crate::{
-    ext::{slice_window, BufReadExt, Byte, Bytes, IteratorExt, PerByte, Split},
+    ext::{slice_stepped, slice_window, Byte, Bytes, IteratorExt, PerByte},
     range::{SlicePlan, SliceRange},
 };
 use clap::{CommandFactory, Parser};
@@ -42,49 +42,6 @@ fn buf_writer<W: Write>(writer: W, capacity: Option<usize>) -> io::BufWriter<W> 
 }
 
 #[inline]
-fn line_mode<R: BufRead, W: Write>(
-    input: R,
-    mut output: W,
-    start: usize,
-    end: Option<usize>,
-    step: NonZeroUsize,
-) -> io::Result<()> {
-    for line in input.lines_with_eol().slice(start, end, Some(step)) {
-        output.write_all(&line?)?;
-    }
-    output.flush()
-}
-
-#[inline]
-fn delimit_mode<R: BufRead, W: Write>(
-    input: R,
-    output: W,
-    delimiter: &[u8],
-    start: usize,
-    end: Option<usize>,
-    step: NonZeroUsize,
-) -> io::Result<()> {
-    fn run<S: Split, R: BufRead, W: Write>(
-        split: S,
-        input: R,
-        mut output: W,
-        start: usize,
-        end: Option<usize>,
-        step: NonZeroUsize,
-    ) -> io::Result<()> {
-        for part in input.split_chunks(split).slice(start, end, Some(step)) {
-            output.write_all(&part?)?;
-        }
-        output.flush()
-    }
-    match delimiter {
-        [] => run(PerByte, input, output, start, end, step),
-        &[b] => run(Byte(b), input, output, start, end, step),
-        multi => run(Bytes(multi), input, output, start, end, step),
-    }
-}
-
-#[inline]
 fn delimit_window<R: BufRead, W: Write>(
     input: R,
     output: W,
@@ -96,6 +53,22 @@ fn delimit_window<R: BufRead, W: Write>(
         [] => slice_window(PerByte, input, output, start, end),
         &[b] => slice_window(Byte(b), input, output, start, end),
         multi => slice_window(Bytes(multi), input, output, start, end),
+    }
+}
+
+#[inline]
+fn delimit_stepped<R: BufRead, W: Write>(
+    input: R,
+    output: W,
+    delimiter: &[u8],
+    start: usize,
+    end: Option<usize>,
+    step: NonZeroUsize,
+) -> io::Result<()> {
+    match delimiter {
+        [] => slice_stepped(PerByte, input, output, start, end, step),
+        &[b] => slice_stepped(Byte(b), input, output, start, end, step),
+        multi => slice_stepped(Bytes(multi), input, output, start, end, step),
     }
 }
 
@@ -208,10 +181,10 @@ where
             SliceMode::Custom(delimiter) => delimit_window(input, output, delimiter, start, end),
         },
         SlicePlan::Stepped { start, end, step } => match mode {
-            SliceMode::Lines => line_mode(input, output, start, end, step),
+            SliceMode::Lines => slice_stepped(Byte(b'\n'), input, output, start, end, step),
             SliceMode::Bytes => byte_mode(input, output, start, end, step),
             SliceMode::Custom(delimiter) => {
-                delimit_mode(input, output, delimiter, start, end, step)
+                delimit_stepped(input, output, delimiter, start, end, step)
             }
         },
     }
@@ -353,7 +326,8 @@ mod tests {
         fn lined(input: &[u8], range: &str) -> Vec<u8> {
             let range = SliceRange::from_str(range).unwrap();
             let mut out = Vec::new();
-            line_mode(
+            slice_stepped(
+                Byte(b'\n'),
                 input,
                 &mut out,
                 range.start,
@@ -444,6 +418,21 @@ mod tests {
                 let input = b"slice\xaabinary stream\nslice binary\xaastream";
                 assert_eq!(lined(input, "::"), input);
             }
+        }
+
+        #[test]
+        fn bounded_step() {
+            assert_eq!(lined(b"l0\nl1\nl2\nl3\nl4\n", "1:4:2"), b"l1\nl3\n");
+        }
+
+        #[test]
+        fn step_selects_terminal_chunk_without_newline() {
+            assert_eq!(lined(b"a\nb\nc", "::2"), b"a\nc");
+        }
+
+        #[test]
+        fn step_skips_terminal_chunk() {
+            assert_eq!(lined(b"a\nb\nc", "1::2"), b"b\n");
         }
     }
 
@@ -536,7 +525,9 @@ mod tests {
                 BrokenPipeWriter,
                 io::BufReader::new,
                 false,
-                |input, output| line_mode(input, output, 0, None, NonZeroUsize::MIN),
+                |input, output| {
+                    slice_stepped(Byte(b'\n'), input, output, 0, None, NonZeroUsize::MIN)
+                },
             );
             fs::remove_file(&file).ok();
 
@@ -569,7 +560,9 @@ mod tests {
                 BrokenPipeWriter,
                 io::BufReader::new,
                 false,
-                |input, output| line_mode(input, output, 0, None, NonZeroUsize::MIN),
+                |input, output| {
+                    slice_stepped(Byte(b'\n'), input, output, 0, None, NonZeroUsize::MIN)
+                },
             );
             fs::remove_file(&readable).ok();
 
@@ -613,6 +606,25 @@ mod tests {
                 assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
             }
             fs::remove_file(&file).ok();
+        }
+
+        #[test]
+        fn slice_stepped_propagates_broken_pipe() {
+            let file = temp_file(b"line one\nline two\nline three\n");
+            let reader = io::BufReader::new(fs::File::open(&file).expect("open temp file"));
+            let range = SliceRange::from_str("::2").unwrap();
+            let err = slice_stepped(
+                Byte(b'\n'),
+                reader,
+                BrokenPipeWriter,
+                range.start,
+                range.end,
+                range.step.unwrap(),
+            )
+            .expect_err("a broken pipe must propagate from slice_stepped");
+            fs::remove_file(&file).ok();
+
+            assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
         }
     }
 
@@ -887,9 +899,9 @@ mod tests {
         }
 
         #[test]
-        fn custom_unit_step_matches_delimit_mode() {
+        fn custom_unit_step_matches_stepped_driver() {
             // The unit-step Custom window (delimit_window) must agree with the
-            // step>1 iterator path (delimit_mode) for every delimiter shape.
+            // stepped driver run at step 1 for every delimiter shape.
             fn agree(delimiter: &[u8], input: &[u8], range: &str) -> Vec<u8> {
                 let range = SliceRange::from_str(range).unwrap();
                 let mut via_apply = Vec::new();
@@ -901,10 +913,10 @@ mod tests {
                     discard,
                 )
                 .expect("");
-                let mut via_iter = Vec::new();
-                delimit_mode(
+                let mut via_stepped = Vec::new();
+                delimit_stepped(
                     input,
-                    &mut via_iter,
+                    &mut via_stepped,
                     delimiter,
                     range.start,
                     range.end,
@@ -912,8 +924,8 @@ mod tests {
                 )
                 .expect("");
                 assert_eq!(
-                    via_apply, via_iter,
-                    "apply vs delimit_mode for {delimiter:?} {range:?}"
+                    via_apply, via_stepped,
+                    "apply vs delimit_stepped for {delimiter:?} {range:?}"
                 );
                 via_apply
             }
