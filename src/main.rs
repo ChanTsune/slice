@@ -5,7 +5,7 @@ mod ext;
 mod range;
 
 use crate::{
-    ext::{slice_stepped, slice_window, Byte, Bytes, IteratorExt, PerByte},
+    ext::{slice_stepped, slice_window, Byte, Bytes, IteratorExt},
     range::{SlicePlan, SliceRange},
 };
 use clap::{CommandFactory, Parser};
@@ -20,7 +20,24 @@ use std::{
 enum SliceMode<'b> {
     Lines,
     Bytes,
+    /// Non-empty by construction: `slice_mode` folds the empty delimiter into
+    /// `Bytes`, so the delimiter drivers never see an empty shape.
     Custom(&'b [u8]),
+}
+
+/// Classify the slicing mode from the resolved flags. An empty `--delimiter`
+/// splits one byte per chunk — identical to byte mode under every plan — so it
+/// is normalized to `Bytes` here, reaching the seek/copy byte fast paths.
+#[inline]
+fn slice_mode(bytes: bool, delimiter: Option<&[u8]>) -> SliceMode<'_> {
+    if bytes {
+        return SliceMode::Bytes;
+    }
+    match delimiter {
+        Some([]) => SliceMode::Bytes,
+        Some(delimiter) => SliceMode::Custom(delimiter),
+        None => SliceMode::Lines,
+    }
 }
 
 #[inline]
@@ -49,8 +66,8 @@ fn delimit_window<R: BufRead, W: Write>(
     start: usize,
     end: Option<usize>,
 ) -> io::Result<()> {
+    debug_assert!(!delimiter.is_empty(), "empty delimiter is byte mode");
     match delimiter {
-        [] => slice_window(PerByte, input, output, start, end),
         &[b] => slice_window(Byte(b), input, output, start, end),
         multi => slice_window(Bytes(multi), input, output, start, end),
     }
@@ -65,8 +82,8 @@ fn delimit_stepped<R: BufRead, W: Write>(
     end: Option<usize>,
     step: NonZeroUsize,
 ) -> io::Result<()> {
+    debug_assert!(!delimiter.is_empty(), "empty delimiter is byte mode");
     match delimiter {
-        [] => slice_stepped(PerByte, input, output, start, end, step),
         &[b] => slice_stepped(Byte(b), input, output, start, end, step),
         multi => slice_stepped(Bytes(multi), input, output, start, end, step),
     }
@@ -272,13 +289,7 @@ fn entry(args: cli::Args) -> bool {
         };
         return stdout_status(explain_mode(stdout().lock(), &range, unit));
     }
-    let mode = if args.bytes {
-        SliceMode::Bytes
-    } else if let Some(delimiter) = &delimiter {
-        SliceMode::Custom(delimiter)
-    } else {
-        SliceMode::Lines
-    };
+    let mode = slice_mode(args.bytes, delimiter.as_deref());
     let plan = range.plan();
     if args.files.is_empty() {
         let input = buf_reader(stdin().lock(), io_buffer_size);
@@ -931,7 +942,42 @@ mod tests {
             }
             assert_eq!(agree(b"||", b"a||b||c\n", "1:"), b"b||c\n"); // multi-byte
             assert_eq!(agree(b",", b"a,b,c,", "1:"), b"b,c,"); // single-byte
-            assert_eq!(agree(b"", b"abcdef", "1:4"), b"bcd"); // empty (PerByte)
+        }
+    }
+
+    mod empty_delimiter {
+        use super::*;
+
+        // slice_mode is the production routing entry() uses; the empty
+        // delimiter must land in byte mode and produce byte-identical output
+        // across every plan shape (Copy, Window, Stepped, Empty).
+        #[test]
+        fn routes_through_byte_machinery() {
+            const INPUT: &[u8] = b"slice\xaabinary\nstream";
+            for range in ["::", "1:", ":3", "2:5", "::2", "1::3", "5:3"] {
+                let plan = SliceRange::from_str(range).unwrap().plan();
+                let apply_with = |mode: &SliceMode| {
+                    let mut out = Vec::new();
+                    apply(mode, INPUT, &mut out, plan, discard).expect("");
+                    out
+                };
+                assert_eq!(
+                    apply_with(&slice_mode(false, Some(b""))),
+                    apply_with(&slice_mode(true, None)),
+                    "empty delimiter diverged from byte mode for {range}"
+                );
+            }
+        }
+
+        #[test]
+        fn classification() {
+            assert!(matches!(slice_mode(false, None), SliceMode::Lines));
+            assert!(matches!(slice_mode(true, None), SliceMode::Bytes));
+            assert!(matches!(slice_mode(false, Some(b"")), SliceMode::Bytes));
+            assert!(matches!(
+                slice_mode(false, Some(b",")),
+                SliceMode::Custom(b",")
+            ));
         }
     }
 
