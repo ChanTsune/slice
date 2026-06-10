@@ -1,0 +1,6 @@
+start: 18446744073709551615
+end:   end of input
+step:  1
+0-based: lines at indices [18446744073709551615, end of input)
+1-based: from the 18446744073709551615th line to the last line
+count: until end of input (step 1)

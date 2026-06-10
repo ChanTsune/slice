@@ -1,0 +1,3 @@
+bin.name = "slice"
+args = ["--explain", "18446744073709551615:"]
+status.code = 0
