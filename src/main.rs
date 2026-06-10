@@ -75,6 +75,12 @@ fn byte_mode<R: BufRead, W: Write>(input: R, mut output: W, range: &SliceRange) 
     output.flush()
 }
 
+#[inline]
+fn explain_mode<W: Write>(mut output: W, range: &SliceRange, unit: &str) -> io::Result<()> {
+    output.write_all(range.explain(unit).as_bytes())?;
+    output.flush()
+}
+
 fn report_error(path: &Path, err: &io::Error) {
     eprintln!("slice: {}: {}", path.display(), err);
 }
@@ -85,6 +91,19 @@ fn report_error(path: &Path, err: &io::Error) {
 #[inline]
 fn is_broken_pipe(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::BrokenPipe
+}
+
+// Exit status for output written without a file context (stdout from stdin or
+// --explain): broken pipe is a quiet success, any other error is reported.
+fn stdout_status(result: io::Result<()>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(err) if is_broken_pipe(&err) => true,
+        Err(err) => {
+            eprintln!("slice: {err}");
+            false
+        }
+    }
 }
 
 #[inline]
@@ -142,8 +161,7 @@ fn entry(args: cli::Args) -> bool {
         } else {
             "line"
         };
-        print!("{}", range.explain(unit));
-        return true;
+        return stdout_status(explain_mode(stdout().lock(), &range, unit));
     }
     let mode = if args.bytes {
         SliceMode::Bytes
@@ -160,14 +178,7 @@ fn entry(args: cli::Args) -> bool {
             SliceMode::Bytes => byte_mode(input, output, &range),
             SliceMode::Custom(delimiter) => delimit_mode(input, output, delimiter, &range),
         };
-        if let Err(err) = result {
-            if is_broken_pipe(&err) {
-                return true;
-            }
-            eprintln!("slice: {err}");
-            return false;
-        }
-        true
+        stdout_status(result)
     } else {
         // A single file never gets a header, so -q only matters for 2+ files.
         let print_header = args.files.len() > 1 && !args.quiet_headers;
@@ -381,6 +392,57 @@ mod tests {
         }
     }
 
+    mod explain {
+        use super::*;
+
+        // A writer that accepts data but fails when flushed, so a dropped
+        // flush result would go unnoticed.
+        struct FlushFailWriter;
+
+        impl Write for FlushFailWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::Error::other("flush failed"))
+            }
+        }
+
+        #[test]
+        fn writes_full_explanation() {
+            let mut out = Vec::new();
+            let range = SliceRange::from_str("1:3").unwrap();
+            explain_mode(&mut out, &range, "line").expect("write to a Vec failed");
+
+            assert_eq!(out, range.explain("line").into_bytes());
+        }
+
+        #[test]
+        fn surfaces_flush_errors() {
+            let range = SliceRange::from_str("1:3").unwrap();
+            let err = explain_mode(FlushFailWriter, &range, "line")
+                .expect_err("a failing flush must surface its error");
+
+            assert_eq!(err.kind(), io::ErrorKind::Other);
+        }
+    }
+
+    mod stdout_status {
+        use super::*;
+
+        #[test]
+        fn broken_pipe_is_success() {
+            assert!(stdout_status(Err(io::Error::from(
+                io::ErrorKind::BrokenPipe
+            ))));
+        }
+
+        #[test]
+        fn other_errors_fail() {
+            assert!(!stdout_status(Err(io::Error::other("boom"))));
+        }
+    }
+
     mod broken_pipe {
         use super::*;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -424,6 +486,15 @@ mod tests {
             fs::remove_file(&file).ok();
 
             assert!(ok, "broken pipe must not fail the exit status");
+        }
+
+        #[test]
+        fn explain_mode_surfaces_the_error() {
+            let range = SliceRange::from_str("1:3").unwrap();
+            let err = explain_mode(BrokenPipeWriter, &range, "line")
+                .expect_err("a failing writer must surface its error");
+
+            assert!(is_broken_pipe(&err));
         }
 
         #[test]
