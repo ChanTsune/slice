@@ -5,7 +5,7 @@ mod ext;
 mod range;
 
 use crate::{
-    ext::{slice_stepped, slice_window, Byte, Bytes, IteratorExt},
+    ext::{slice_stepped, slice_window, Byte, Bytes},
     range::{SlicePlan, SliceRange},
 };
 use clap::{CommandFactory, Parser};
@@ -89,21 +89,55 @@ fn delimit_stepped<R: BufRead, W: Write>(
     }
 }
 
-#[inline]
+// Byte-mode stepped path: emits the bytes at indices i in [start, min(end, len))
+// with (i - start) % step == 0. `end` is an absolute index from the stream
+// start, so start >= end selects nothing.
 fn byte_mode<R: BufRead, W: Write>(
-    input: R,
+    mut input: R,
     mut output: W,
     start: usize,
     end: Option<usize>,
     step: NonZeroUsize,
 ) -> io::Result<()> {
     const WRITE_BUF_SIZE: usize = 8 * 1024;
+    let mut remaining = end.map(|end| end.saturating_sub(start));
+    if remaining == Some(0) {
+        return output.flush();
+    }
+    discard(&mut input, start as u64)?;
+    let step = step.get();
     let mut buf = Vec::with_capacity(WRITE_BUF_SIZE);
-    for byte in input.bytes().slice(start, end, Some(step)) {
-        buf.push(byte?);
-        if buf.len() == WRITE_BUF_SIZE {
-            output.write_all(&buf)?;
-            buf.clear();
+    // Offset of the next selected byte within the unread stream; carried
+    // across fill_buf blocks so the stride stays aligned to `start`.
+    let mut phase = 0;
+    loop {
+        let block = match input.fill_buf() {
+            Ok(block) => block,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        };
+        if block.is_empty() {
+            break;
+        }
+        let limit = match remaining {
+            Some(remaining) => block.len().min(remaining),
+            None => block.len(),
+        };
+        while phase < limit {
+            buf.push(block[phase]);
+            if buf.len() == WRITE_BUF_SIZE {
+                output.write_all(&buf)?;
+                buf.clear();
+            }
+            phase = phase.saturating_add(step);
+        }
+        phase -= limit;
+        input.consume(limit);
+        if let Some(remaining) = &mut remaining {
+            *remaining -= limit;
+            if *remaining == 0 {
+                break;
+            }
         }
     }
     if !buf.is_empty() {
@@ -703,6 +737,60 @@ mod tests {
             for (range, start, step) in [("::2", 0, 2), ("5::3", 5, 3)] {
                 let expected: Vec<u8> = input.iter().copied().skip(start).step_by(step).collect();
                 assert_eq!(byted(&input, range), expected, "range {range}");
+            }
+        }
+
+        #[test]
+        fn stride_phase_carries_across_single_byte_blocks() {
+            // Capacity 1 forces every byte into its own fill_buf block, so the
+            // selection only works if the stride phase survives each boundary.
+            let reader = io::BufReader::with_capacity(1, b"abcdefghij".as_slice());
+            let mut out = Vec::new();
+            byte_mode(reader, &mut out, 1, None, NonZeroUsize::new(3).unwrap()).expect("");
+            assert_eq!(out, b"beh");
+        }
+
+        #[test]
+        fn stride_parity_with_iterator_oracle() {
+            use crate::ext::IteratorExt;
+
+            // Patterned non-UTF-8 input; a prime length avoids lining up with
+            // any of the reader capacities below.
+            let input: Vec<u8> = (0..1031u32)
+                .map(|i| match i % 7 {
+                    0 => 0x00,
+                    3 => 0xaa,
+                    _ => (i % 251) as u8,
+                })
+                .collect();
+            let ranges = [
+                (0, None),
+                (5, None),
+                (0, Some(13)),
+                (3, Some(17)),
+                (100, None),
+                (0, Some(0)),
+                (2000, None),
+                (3, Some(5000)),
+            ];
+            for (start, end) in ranges {
+                for step in [1, 2, 3, 7, 250] {
+                    let step = NonZeroUsize::new(step).unwrap();
+                    let expected: Vec<u8> = input
+                        .iter()
+                        .copied()
+                        .slice(start, end, Some(step))
+                        .collect();
+                    for capacity in [1, 2, 3, 8192] {
+                        let reader = io::BufReader::with_capacity(capacity, input.as_slice());
+                        let mut out = Vec::new();
+                        byte_mode(reader, &mut out, start, end, step).expect("");
+                        assert_eq!(
+                            out, expected,
+                            "start={start} end={end:?} step={step} capacity={capacity}"
+                        );
+                    }
+                }
             }
         }
     }
