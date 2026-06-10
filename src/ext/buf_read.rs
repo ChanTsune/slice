@@ -62,6 +62,20 @@ fn skip_until<R: BufRead + ?Sized>(r: &mut R, delim: u8) -> io::Result<usize> {
 pub(crate) trait Split {
     fn read<R: BufRead + ?Sized>(&self, r: &mut R, buf: &mut Vec<u8>) -> io::Result<usize>;
     fn skip<R: BufRead + ?Sized>(&self, r: &mut R) -> io::Result<usize>;
+
+    /// Skip up to `n` chunks, returning how many were skipped; fewer than `n`
+    /// means end of stream, with a terminal delimiter-less fragment counting
+    /// as one chunk. Equivalent to `n` `skip` calls; kinds with a cheaper bulk
+    /// scan override it.
+    #[inline]
+    fn skip_n<R: BufRead + ?Sized>(&self, r: &mut R, n: usize) -> io::Result<usize> {
+        for skipped in 0..n {
+            if self.skip(r)? == 0 {
+                return Ok(skipped);
+            }
+        }
+        Ok(n)
+    }
 }
 
 /// Single-byte delimiter. Lines are `Byte(b'\n')`, `-z` is `Byte(0)`.
@@ -97,6 +111,54 @@ impl Split for Byte {
     #[inline]
     fn skip<R: BufRead + ?Sized>(&self, r: &mut R) -> io::Result<usize> {
         skip_until(r, self.0)
+    }
+
+    /// Counts delimiters per `fill_buf` block instead of re-entering the
+    /// scanner once per chunk, so skipping millions of short chunks costs one
+    /// `memchr_iter` pass per block.
+    fn skip_n<R: BufRead + ?Sized>(&self, r: &mut R, n: usize) -> io::Result<usize> {
+        // Not just a fast path: the loop stops on `skipped + found == n`, which
+        // n = 0 can never satisfy once a delimiter is counted.
+        if n == 0 {
+            return Ok(0);
+        }
+        let mut skipped = 0;
+        // Whether bytes were consumed after the most recent delimiter: at end
+        // of stream such a trailing fragment counts as one chunk, like `skip`.
+        let mut fragment = false;
+        loop {
+            let (used, found) = {
+                let block = match r.fill_buf() {
+                    Ok(b) => b,
+                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                };
+                if block.is_empty() {
+                    return Ok(skipped + fragment as usize);
+                }
+                let mut found = 0;
+                let mut last_end = 0;
+                for i in memchr::memchr_iter(self.0, block) {
+                    found += 1;
+                    last_end = i + 1;
+                    if skipped + found == n {
+                        break;
+                    }
+                }
+                if skipped + found == n {
+                    // The n-th delimiter is in this block: consume through it.
+                    (last_end, found)
+                } else {
+                    fragment = last_end < block.len();
+                    (block.len(), found)
+                }
+            };
+            r.consume(used);
+            skipped += found;
+            if skipped == n {
+                return Ok(n);
+            }
+        }
     }
 }
 
@@ -203,10 +265,9 @@ pub(crate) fn slice_window<S: Split, R: BufRead, W: Write>(
     start: usize,
     end: Option<usize>,
 ) -> io::Result<()> {
-    for _ in 0..start {
-        if split.skip(&mut input)? == 0 {
-            break;
-        }
+    if split.skip_n(&mut input, start)? < start {
+        // End of stream inside the skip phase: the window is empty.
+        return output.flush();
     }
     match end {
         None => {
@@ -244,12 +305,12 @@ pub(crate) fn slice_stepped<S: Split, R: BufRead, W: Write>(
 ) -> io::Result<()> {
     let mut buf = Vec::new();
     let mut index = 0usize;
-    'chunks: for target in (0usize..).slice(start, end, Some(step)) {
-        while index < target {
-            if split.skip(&mut input)? == 0 {
-                break 'chunks;
-            }
-            index += 1;
+    for target in (0usize..).slice(start, end, Some(step)) {
+        let gap = target - index;
+        let skipped = split.skip_n(&mut input, gap)?;
+        index += skipped;
+        if skipped < gap {
+            break;
         }
         buf.clear();
         if split.read(&mut input, &mut buf)? == 0 {
@@ -522,6 +583,10 @@ mod tests {
         fn skip<R: BufRead + ?Sized>(&self, r: &mut R) -> io::Result<usize> {
             Byte(self.0).skip(r)
         }
+        // Forwarded so the parity harnesses exercise Byte's bulk override.
+        fn skip_n<R: BufRead + ?Sized>(&self, r: &mut R, n: usize) -> io::Result<usize> {
+            Byte(self.0).skip_n(r, n)
+        }
     }
 
     #[derive(Clone, Copy)]
@@ -533,6 +598,77 @@ mod tests {
         fn skip<R: BufRead + ?Sized>(&self, r: &mut R) -> io::Result<usize> {
             Bytes::new(self.0).skip(r)
         }
+    }
+
+    // skip_n must match `n` one-by-one skips exactly: same chunk count and
+    // same remaining stream. Small capacities force the delimiter to land as
+    // the last byte of a block and fragments to span blocks.
+    fn assert_skip_n_matches_skip<S: Split>(split: S, input: &[u8]) {
+        use std::io::Read;
+        for n in 0..=6 {
+            for capacity in [1, 2, 3, 8 * 1024] {
+                let mut bulk = BufReader::with_capacity(capacity, input);
+                let bulk_count = split.skip_n(&mut bulk, n).unwrap();
+
+                let mut manual = BufReader::with_capacity(capacity, input);
+                let mut manual_count = 0;
+                while manual_count < n && split.skip(&mut manual).unwrap() > 0 {
+                    manual_count += 1;
+                }
+
+                assert_eq!(
+                    bulk_count, manual_count,
+                    "skip_n count diverged from skip for n={n} capacity={capacity} on {input:?}"
+                );
+                let mut bulk_rest = Vec::new();
+                bulk.read_to_end(&mut bulk_rest).unwrap();
+                let mut manual_rest = Vec::new();
+                manual.read_to_end(&mut manual_rest).unwrap();
+                assert_eq!(
+                    bulk_rest, manual_rest,
+                    "skip_n remainder diverged from skip for n={n} capacity={capacity} on {input:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn skip_n_matches_skip_line() {
+        for input in [
+            &b""[..],
+            b"a\nb\nc\nd\ne\n",
+            b"a\nb\nc", // trailing fragment
+            b"\n\n\n",
+            b"abc",          // no delimiter: one fragment chunk
+            b"abcd\nefgh\n", // chunks longer than the small capacities
+            b"abcd\nefgh",
+        ] {
+            assert_skip_n_matches_skip(Byte(b'\n'), input);
+        }
+    }
+
+    #[test]
+    fn skip_n_matches_skip_nul() {
+        for input in [&b"a\0b\0c\0d\0"[..], b"a\0b\0c", b"\0\0", b"ab"] {
+            assert_skip_n_matches_skip(Byte(0), input);
+        }
+    }
+
+    #[test]
+    fn skip_n_matches_skip_multibyte_default() {
+        for input in [&b"a||b||c||d||"[..], b"a||b||c", b"a|||b|", b"aaaa"] {
+            assert_skip_n_matches_skip(Bytes::new(b"||"), input);
+        }
+    }
+
+    #[test]
+    fn skip_n_zero_consumes_nothing() {
+        use std::io::Read;
+        let mut input = BufReader::new(&b"a\nb\n"[..]);
+        assert_eq!(Byte(b'\n').skip_n(&mut input, 0).unwrap(), 0);
+        let mut rest = Vec::new();
+        input.read_to_end(&mut rest).unwrap();
+        assert_eq!(rest, b"a\nb\n");
     }
 
     #[test]
