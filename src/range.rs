@@ -51,6 +51,9 @@ pub(crate) enum ParseSliceRangeError {
 /// instead of re-testing field combinations at every branch.
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub(crate) enum SlicePlan {
+    /// Bounded with `start >= end` (`5:3`, `:0`): selects nothing in any mode,
+    /// so the input need not be read at all.
+    Empty,
     /// Selects the whole input unchanged (`:`, `::`, `0::1`): the output equals
     /// the input byte-for-byte in every mode, so splitting can be skipped in
     /// favor of a verbatim copy.
@@ -70,6 +73,10 @@ pub(crate) enum SlicePlan {
 impl SliceRange {
     #[inline]
     pub(crate) fn plan(&self) -> SlicePlan {
+        // Checked before step: no step can select anything from `start >= end`.
+        if self.end.is_some_and(|end| self.start >= end) {
+            return SlicePlan::Empty;
+        }
         match self.step {
             Some(step) if step.get() > 1 => SlicePlan::Stepped {
                 start: self.start,
@@ -373,6 +380,28 @@ mod tests {
                     step: NonZeroUsize::new(step).unwrap()
                 },
                 "{range} must stay on the stepped pipeline"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_empties_bounded_start_at_or_past_end() {
+        for empty in ["5:3", "5:5", ":0", "5:3:2", "5:+0"] {
+            assert_eq!(
+                SliceRange::from_str(empty).unwrap().plan(),
+                SlicePlan::Empty,
+                "{empty} selects nothing and must not read input"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_keeps_nonempty_bounded_ranges_off_empty() {
+        for (range, start, end) in [("0:1", 0, Some(1)), ("4:5", 4, Some(5))] {
+            assert_eq!(
+                SliceRange::from_str(range).unwrap().plan(),
+                SlicePlan::Window { start, end },
+                "{range} selects something and must stay a window"
             );
         }
     }
