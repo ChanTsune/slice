@@ -636,7 +636,7 @@ mod tests {
         fn slice_window_propagates_broken_pipe() {
             let file = temp_file(b"line one\nline two\nline three\n");
             // Both window arms must surface the broken pipe: unbounded `1:`
-            // exercises the io::copy tail, bounded `0:3` the write_all loop.
+            // exercises the io::copy tail, bounded `0:3` the read_to loop.
             for range in ["1:", "0:3"] {
                 let reader = io::BufReader::new(fs::File::open(&file).expect("open temp file"));
                 let range = SliceRange::from_str(range).unwrap();

@@ -6,15 +6,16 @@ use std::{
 };
 
 /// Scan to the first `delim` byte. `sink` receives each consumed slice; it is the
-/// only thing that differs between reading (copy into a buffer) and skipping
-/// (discard). Returns the total bytes consumed: `Ok(0)` means the stream was
-/// already at EOF (no chunk), `Ok(n > 0)` means a chunk was consumed — including
-/// a final chunk that lacks a trailing `delim`.
+/// only thing that differs between emitting (write through) and skipping
+/// (discard). A sink error aborts the scan; the bytes handed to the failing call
+/// are not consumed. Returns the total bytes consumed: `Ok(0)` means the stream
+/// was already at EOF (no chunk), `Ok(n > 0)` means a chunk was consumed —
+/// including a final chunk that lacks a trailing `delim`.
 #[inline]
 fn scan_until<R: BufRead + ?Sized>(
     r: &mut R,
     delim: u8,
-    mut sink: impl FnMut(&[u8]),
+    mut sink: impl FnMut(&[u8]) -> io::Result<()>,
 ) -> io::Result<usize> {
     let mut read = 0;
     loop {
@@ -26,11 +27,11 @@ fn scan_until<R: BufRead + ?Sized>(
             };
             match memchr::memchr(delim, available) {
                 Some(i) => {
-                    sink(&available[..=i]);
+                    sink(&available[..=i])?;
                     (true, i + 1)
                 }
                 None => {
-                    sink(available);
+                    sink(available)?;
                     (false, available.len())
                 }
             }
@@ -44,23 +45,22 @@ fn scan_until<R: BufRead + ?Sized>(
 }
 
 #[inline]
-fn read_until<R: BufRead + ?Sized>(r: &mut R, delim: u8, buf: &mut Vec<u8>) -> io::Result<usize> {
-    scan_until(r, delim, |chunk| buf.extend_from_slice(chunk))
-}
-
-#[inline]
 fn skip_until<R: BufRead + ?Sized>(r: &mut R, delim: u8) -> io::Result<usize> {
-    scan_until(r, delim, |_| {})
+    scan_until(r, delim, |_| Ok(()))
 }
 
 /// A strategy for cutting a stream into chunks. Each chunk keeps its trailing
-/// delimiter; the last chunk may lack one. `read` and `skip` are symmetric: both
-/// advance the reader by exactly one chunk and return its byte length (`Ok(0)`
-/// only at end of stream); `read` additionally appends the chunk to `buf`. Kinds
-/// are separate types so the single-byte path never pays for the multi-byte
-/// straddle machinery.
+/// delimiter; the last chunk may lack one. `read_to` and `skip` are symmetric:
+/// both advance the reader by exactly one chunk and return its byte length
+/// (`Ok(0)` only at end of stream); `read_to` additionally writes the chunk to
+/// `w`, straight from the reader's buffer. Kinds are separate types so the
+/// single-byte path never pays for the multi-byte straddle machinery.
 pub(crate) trait Split {
-    fn read<R: BufRead + ?Sized>(&self, r: &mut R, buf: &mut Vec<u8>) -> io::Result<usize>;
+    fn read_to<R: BufRead + ?Sized, W: Write + ?Sized>(
+        &self,
+        r: &mut R,
+        w: &mut W,
+    ) -> io::Result<usize>;
     fn skip<R: BufRead + ?Sized>(&self, r: &mut R) -> io::Result<usize>;
 
     /// Skip up to `n` chunks, returning how many were skipped; fewer than `n`
@@ -105,8 +105,12 @@ impl<'d> Bytes<'d> {
 
 impl Split for Byte {
     #[inline]
-    fn read<R: BufRead + ?Sized>(&self, r: &mut R, buf: &mut Vec<u8>) -> io::Result<usize> {
-        read_until(r, self.0, buf)
+    fn read_to<R: BufRead + ?Sized, W: Write + ?Sized>(
+        &self,
+        r: &mut R,
+        w: &mut W,
+    ) -> io::Result<usize> {
+        scan_until(r, self.0, |chunk| w.write_all(chunk))
     }
     #[inline]
     fn skip<R: BufRead + ?Sized>(&self, r: &mut R) -> io::Result<usize> {
@@ -164,21 +168,23 @@ impl Split for Byte {
 
 impl Split for Bytes<'_> {
     #[inline]
-    fn read<R: BufRead + ?Sized>(&self, r: &mut R, buf: &mut Vec<u8>) -> io::Result<usize> {
-        scan_until_delim(r, self.delimiter, &self.finder, |chunk| {
-            buf.extend_from_slice(chunk)
-        })
+    fn read_to<R: BufRead + ?Sized, W: Write + ?Sized>(
+        &self,
+        r: &mut R,
+        w: &mut W,
+    ) -> io::Result<usize> {
+        scan_until_delim(r, self.delimiter, &self.finder, |chunk| w.write_all(chunk))
     }
 
     #[inline]
     fn skip<R: BufRead + ?Sized>(&self, r: &mut R) -> io::Result<usize> {
-        scan_until_delim(r, self.delimiter, &self.finder, |_| {})
+        scan_until_delim(r, self.delimiter, &self.finder, |_| Ok(()))
     }
 }
 
 /// Multi-byte counterpart of `scan_until`: scan to the first full `delimiter`
-/// match, same contract (`sink` receives each consumed slice, `Ok(0)` means
-/// EOF, the final chunk may lack the delimiter).
+/// match, same contract (`sink` receives each consumed slice and may abort with
+/// an error, `Ok(0)` means EOF, the final chunk may lack the delimiter).
 ///
 /// A match can straddle a `fill_buf` boundary, so the last `delimiter.len() - 1`
 /// consumed bytes are carried across blocks. Each block is searched in two
@@ -192,7 +198,7 @@ fn scan_until_delim<R: BufRead + ?Sized>(
     r: &mut R,
     delimiter: &[u8],
     finder: &memmem::Finder<'_>,
-    mut sink: impl FnMut(&[u8]),
+    mut sink: impl FnMut(&[u8]) -> io::Result<()>,
 ) -> io::Result<usize> {
     let keep = delimiter.len() - 1;
     // Allocated lazily: the carry is only written when a chunk spans a
@@ -220,11 +226,11 @@ fn scan_until_delim<R: BufRead + ?Sized>(
             };
             match straddle.or_else(|| finder.find(block).map(|i| i + delimiter.len())) {
                 Some(used) => {
-                    sink(&block[..used]);
+                    sink(&block[..used])?;
                     (true, used)
                 }
                 None => {
-                    sink(block);
+                    sink(block)?;
                     extend_carry(&mut carry, block, keep);
                     (false, block.len())
                 }
@@ -255,9 +261,10 @@ fn extend_carry(carry: &mut Vec<u8>, block: &[u8], keep: usize) {
 /// Unit-step line/delimiter fast path. A unit-step range selects contiguous
 /// chunks, i.e. one contiguous byte span: skip `start` chunks, then emit the
 /// window. Unbounded `start:` copies the tail verbatim; bounded `start:end`
-/// emits `end - start` more chunks reusing one buffer. `end` is an absolute
-/// chunk index from the stream start, matching IteratorExt::slice's
-/// take(end).skip(start) ordering, so start >= end yields an empty window.
+/// writes `end - start` more chunks straight from the reader's buffer. `end`
+/// is an absolute chunk index from the stream start, matching
+/// IteratorExt::slice's take(end).skip(start) ordering, so start >= end yields
+/// an empty window.
 pub(crate) fn slice_window<S: Split, R: BufRead, W: Write>(
     split: S,
     mut input: R,
@@ -275,13 +282,10 @@ pub(crate) fn slice_window<S: Split, R: BufRead, W: Write>(
         }
         Some(end) => {
             let count = end.saturating_sub(start);
-            let mut buf = Vec::new();
             for _ in 0..count {
-                buf.clear();
-                if split.read(&mut input, &mut buf)? == 0 {
+                if split.read_to(&mut input, &mut output)? == 0 {
                     break;
                 }
-                output.write_all(&buf)?;
             }
         }
     }
@@ -291,10 +295,10 @@ pub(crate) fn slice_window<S: Split, R: BufRead, W: Write>(
 /// Stepped (step > 1) line/delimiter path. The surviving chunk indices come
 /// from running `IteratorExt::slice` over the index stream itself, so the
 /// take(end).skip(start).step_by(step) ordering is inherited from the same
-/// adapter as every other mode rather than re-derived. Survivors are read into
-/// one reused buffer; the gaps between them are skipped without copying.
-/// Stops at end of stream or after the last selected index, so a bounded `end`
-/// never reads past its final selected chunk.
+/// adapter as every other mode rather than re-derived. Survivors are written
+/// straight from the reader's buffer; the gaps between them are skipped
+/// without copying. Stops at end of stream or after the last selected index,
+/// so a bounded `end` never reads past its final selected chunk.
 pub(crate) fn slice_stepped<S: Split, R: BufRead, W: Write>(
     split: S,
     mut input: R,
@@ -303,7 +307,6 @@ pub(crate) fn slice_stepped<S: Split, R: BufRead, W: Write>(
     end: Option<usize>,
     step: NonZeroUsize,
 ) -> io::Result<()> {
-    let mut buf = Vec::new();
     let mut index = 0usize;
     for target in (0usize..).slice(start, end, Some(step)) {
         let gap = target - index;
@@ -312,11 +315,9 @@ pub(crate) fn slice_stepped<S: Split, R: BufRead, W: Write>(
         if skipped < gap {
             break;
         }
-        buf.clear();
-        if split.read(&mut input, &mut buf)? == 0 {
+        if split.read_to(&mut input, &mut output)? == 0 {
             break;
         }
-        output.write_all(&buf)?;
         index += 1;
     }
     output.flush()
@@ -377,7 +378,7 @@ mod tests {
         let mut chunks = Vec::new();
         loop {
             let mut buf = Vec::new();
-            if split.read(&mut input, &mut buf).unwrap() == 0 {
+            if split.read_to(&mut input, &mut buf).unwrap() == 0 {
                 return chunks;
             }
             chunks.push(buf);
@@ -577,8 +578,12 @@ mod tests {
     #[derive(Clone, Copy)]
     struct ByteRef(u8);
     impl Split for ByteRef {
-        fn read<R: BufRead + ?Sized>(&self, r: &mut R, buf: &mut Vec<u8>) -> io::Result<usize> {
-            Byte(self.0).read(r, buf)
+        fn read_to<R: BufRead + ?Sized, W: Write + ?Sized>(
+            &self,
+            r: &mut R,
+            w: &mut W,
+        ) -> io::Result<usize> {
+            Byte(self.0).read_to(r, w)
         }
         fn skip<R: BufRead + ?Sized>(&self, r: &mut R) -> io::Result<usize> {
             Byte(self.0).skip(r)
@@ -592,8 +597,12 @@ mod tests {
     #[derive(Clone, Copy)]
     struct BytesRef<'d>(&'d [u8]);
     impl Split for BytesRef<'_> {
-        fn read<R: BufRead + ?Sized>(&self, r: &mut R, buf: &mut Vec<u8>) -> io::Result<usize> {
-            Bytes::new(self.0).read(r, buf)
+        fn read_to<R: BufRead + ?Sized, W: Write + ?Sized>(
+            &self,
+            r: &mut R,
+            w: &mut W,
+        ) -> io::Result<usize> {
+            Bytes::new(self.0).read_to(r, w)
         }
         fn skip<R: BufRead + ?Sized>(&self, r: &mut R) -> io::Result<usize> {
             Bytes::new(self.0).skip(r)
@@ -802,5 +811,91 @@ mod tests {
             windowed(ByteRef(b'\n'), input, 1, None, 8 * 1024),
             b"slice\xaa"
         );
+    }
+
+    // Fails on its second write call. Chunks go to the writer straight from
+    // the reader's buffer, so with capacity 1 a single chunk spans several
+    // writes and the failure lands mid-chunk.
+    struct FailOnSecondWrite(usize);
+
+    impl Write for FailOnSecondWrite {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0 += 1;
+            if self.0 >= 2 {
+                Err(io::Error::other("second write failed"))
+            } else {
+                Ok(buf.len())
+            }
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn slice_window_surfaces_write_errors_mid_chunk() {
+        let err = slice_window(
+            Byte(b'\n'),
+            BufReader::with_capacity(1, &b"abc\n"[..]),
+            FailOnSecondWrite(0),
+            0,
+            Some(1),
+        )
+        .expect_err("a write failure mid-chunk must surface from slice_window");
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+
+        let err = slice_window(
+            Bytes::new(b"||"),
+            BufReader::with_capacity(1, &b"abc||"[..]),
+            FailOnSecondWrite(0),
+            0,
+            Some(1),
+        )
+        .expect_err("a write failure mid-chunk must surface from slice_window");
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn slice_stepped_surfaces_write_errors_mid_chunk() {
+        let err = slice_stepped(
+            Byte(b'\n'),
+            BufReader::with_capacity(1, &b"abc\nd\ne\n"[..]),
+            FailOnSecondWrite(0),
+            0,
+            None,
+            NonZeroUsize::new(2).unwrap(),
+        )
+        .expect_err("a write failure mid-chunk must surface from slice_stepped");
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+    }
+
+    // read_to's return contract: every chunk reports its full byte length, and
+    // Ok(0) appears only at end of stream — where it stays Ok(0).
+    fn assert_read_to_eof_contract<S: Split>(split: S, input: &[u8]) {
+        let mut r = BufReader::with_capacity(2, input);
+        let mut consumed = 0;
+        loop {
+            let mut buf = Vec::new();
+            let n = split.read_to(&mut r, &mut buf).unwrap();
+            if n == 0 {
+                assert!(buf.is_empty(), "Ok(0) must not produce bytes");
+                break;
+            }
+            assert_eq!(n, buf.len(), "consumed count must match emitted bytes");
+            consumed += n;
+        }
+        assert_eq!(consumed, input.len(), "Ok(0) before the stream ran out");
+        let mut buf = Vec::new();
+        assert_eq!(split.read_to(&mut r, &mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn read_to_returns_zero_only_at_eof() {
+        for input in [&b""[..], b"a\nb\nc\n", b"a\nb\nc", b"abc"] {
+            assert_read_to_eof_contract(Byte(b'\n'), input);
+        }
+        for input in [&b""[..], b"a||b||c||", b"a||b||c", b"abc", b"|"] {
+            assert_read_to_eof_contract(Bytes::new(b"||"), input);
+        }
     }
 }
