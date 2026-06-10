@@ -107,8 +107,17 @@ fn byte_mode<R: BufRead, W: Write>(
     end: Option<usize>,
     step: NonZeroUsize,
 ) -> io::Result<()> {
+    const WRITE_BUF_SIZE: usize = 8 * 1024;
+    let mut buf = Vec::with_capacity(WRITE_BUF_SIZE);
     for byte in input.bytes().slice(start, end, Some(step)) {
-        output.write_all(&[byte?])?;
+        buf.push(byte?);
+        if buf.len() == WRITE_BUF_SIZE {
+            output.write_all(&buf)?;
+            buf.clear();
+        }
+    }
+    if !buf.is_empty() {
+        output.write_all(&buf)?;
     }
     output.flush()
 }
@@ -654,6 +663,17 @@ mod tests {
                 byted(INPUT, "::2"),
                 b"siecmadi ipesrn lcn omn.Lk  yhnsiesna."
             );
+        }
+
+        #[test]
+        fn stepped_output_crossing_write_buffer_boundary() {
+            let input: Vec<u8> = (0..64 * 1024u32).map(|i| (i % 251) as u8).collect();
+            // "::2" selects exactly 32 KiB (a multiple of the 8 KiB write
+            // buffer), "5::3" leaves a partial final batch.
+            for (range, start, step) in [("::2", 0, 2), ("5::3", 5, 3)] {
+                let expected: Vec<u8> = input.iter().copied().skip(start).step_by(step).collect();
+                assert_eq!(byted(&input, range), expected, "range {range}");
+            }
         }
     }
 
