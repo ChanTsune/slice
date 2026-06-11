@@ -7,10 +7,10 @@ use std::{
 
 /// Scan to the first `delim` byte. `sink` receives each consumed slice; it is the
 /// only thing that differs between emitting (write through) and skipping
-/// (discard). A sink error aborts the scan; the bytes handed to the failing call
-/// are not consumed. Returns the total bytes consumed: `Ok(0)` means the stream
-/// was already at EOF (no chunk), `Ok(n > 0)` means a chunk was consumed —
-/// including a final chunk that lacks a trailing `delim`.
+/// (discard), and a sink error aborts the scan. Returns the total bytes
+/// consumed: `Ok(0)` means the stream was already at EOF (no chunk),
+/// `Ok(n > 0)` means a chunk was consumed — including a final chunk that lacks
+/// a trailing `delim`.
 #[inline]
 fn scan_until<R: BufRead + ?Sized>(
     r: &mut R,
@@ -149,7 +149,6 @@ impl Split for Byte {
                     }
                 }
                 if skipped + found == n {
-                    // The n-th delimiter is in this block: consume through it.
                     (last_end, found)
                 } else {
                     fragment = last_end < block.len();
@@ -270,7 +269,6 @@ pub(crate) fn slice_window<S: Split, R: BufRead, W: Write>(
     end: Option<usize>,
 ) -> io::Result<()> {
     if split.skip_n(&mut input, start)? < start {
-        // End of stream inside the skip phase: the window is empty.
         return output.flush();
     }
     match end {
@@ -723,12 +721,11 @@ mod tests {
 
     #[test]
     fn multibyte_overlap() {
-        // Skipping 1 chunk of `a|||b|` split on `||` yields the rest, `|b|`.
+        // `a|||b|` splits leftmost into `a||`, `|b|`.
         assert_eq!(
             windowed(BytesRef(b"||"), b"a|||b|", 1, None, 8 * 1024),
             b"|b|"
         );
-        // Reading 1 chunk yields the first, `a||`.
         assert_eq!(
             windowed(BytesRef(b"||"), b"a|||b|", 0, Some(1), 8 * 1024),
             b"a||"
