@@ -3,11 +3,20 @@ use std::{
     str::FromStr,
 };
 
+/// One bound of a slice. `FromEnd` is a distance back from the end of input;
+/// the lexeme `-0` normalizes to `FromStart(0)` at parse time (Python has no
+/// -0), so zero distance is unrepresentable here.
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub(crate) enum SliceIndex {
+    FromStart(usize),
+    FromEnd(NonZeroUsize),
+}
+
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub(crate) struct SliceRange {
     pub(crate) start: usize,
     /// `None` means unbounded (run to the end of input).
-    pub(crate) end: Option<usize>,
+    pub(crate) end: Option<SliceIndex>,
     pub(crate) step: Option<NonZeroUsize>,
 }
 
@@ -70,6 +79,26 @@ pub(crate) enum SlicePlan {
     },
 }
 
+/// Whether a parsed range can be classified before any input is seen.
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+pub(crate) enum Plan {
+    /// Head-relative or statically decidable: classified once, up front.
+    Resolved(SlicePlan),
+    /// Tail-relative: resolution needs the input length (per input), or a
+    /// streaming buffer when the length is unknowable.
+    Deferred(DeferredPlan),
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+pub(crate) enum DeferredPlan {
+    /// `start:-m…` — head-relative start, tail-relative end.
+    Lag {
+        start: usize,
+        back: NonZeroUsize,
+        step: NonZeroUsize,
+    },
+}
+
 /// Classify absolute (head-relative) bounds into an execution plan.
 #[inline]
 fn classify(start: usize, end: Option<usize>, step: Option<NonZeroUsize>) -> SlicePlan {
@@ -86,87 +115,138 @@ fn classify(start: usize, end: Option<usize>, step: Option<NonZeroUsize>) -> Sli
 
 impl SliceRange {
     #[inline]
-    pub(crate) fn plan(&self) -> SlicePlan {
-        classify(self.start, self.end, self.step)
+    pub(crate) fn plan(&self) -> Plan {
+        match self.end {
+            None => Plan::Resolved(classify(self.start, None, self.step)),
+            Some(SliceIndex::FromStart(end)) => {
+                Plan::Resolved(classify(self.start, Some(end), self.step))
+            }
+            Some(SliceIndex::FromEnd(back)) => Plan::Deferred(DeferredPlan::Lag {
+                start: self.start,
+                back,
+                step: self.step.unwrap_or(NonZeroUsize::MIN),
+            }),
+        }
     }
 
     /// Render a human-readable description of what this resolved range selects,
     /// without reading any input. `unit` names the elements (e.g. "line").
     pub(crate) fn explain(&self, unit: &str) -> String {
         let step = self.step.map_or(1, NonZeroUsize::get);
-
-        let mut out = String::new();
-        out.push_str(&format!("start: {}\n", self.start));
         match self.end {
-            None => out.push_str("end:   end of input\n"),
-            Some(end) => out.push_str(&format!("end:   {end} (exclusive)\n")),
+            None => explain_resolved(self.start, None, step, unit),
+            Some(SliceIndex::FromStart(end)) => explain_resolved(self.start, Some(end), step, unit),
+            Some(SliceIndex::FromEnd(back)) => explain_lag(self.start, back, step, unit),
         }
-        out.push_str(&format!("step:  {step}\n"));
+    }
+}
 
-        match self.end {
-            None => out.push_str(&format!(
-                "0-based: {unit}s at indices [{}, end of input)",
-                self.start
-            )),
-            Some(end) => out.push_str(&format!(
-                "0-based: {unit}s at indices [{}, {end})",
-                self.start
-            )),
-        }
-        if step != 1 {
-            out.push_str(&format!(", every {step} starting at {}", self.start));
-        }
-        out.push('\n');
+fn explain_resolved(start: usize, end: Option<usize>, step: usize, unit: &str) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("start: {start}\n"));
+    match end {
+        None => out.push_str("end:   end of input\n"),
+        Some(end) => out.push_str(&format!("end:   {end} (exclusive)\n")),
+    }
+    out.push_str(&format!("step:  {step}\n"));
 
-        // 1-based human positions ("Nth line").
-        let first_pos = self.start.saturating_add(1);
-        match self.end {
-            None => {
+    match end {
+        None => out.push_str(&format!(
+            "0-based: {unit}s at indices [{start}, end of input)"
+        )),
+        Some(end) => out.push_str(&format!("0-based: {unit}s at indices [{start}, {end})")),
+    }
+    if step != 1 {
+        out.push_str(&format!(", every {step} starting at {start}"));
+    }
+    out.push('\n');
+
+    // 1-based human positions ("Nth line").
+    let first_pos = start.saturating_add(1);
+    match end {
+        None => {
+            if step == 1 {
+                out.push_str(&format!(
+                    "1-based: from the {} {unit} to the last {unit}\n",
+                    ordinal(first_pos)
+                ));
+            } else {
+                out.push_str(&format!(
+                    "1-based: every {step}{} {unit} from the {} {unit} to the last {unit}\n",
+                    ordinal_suffix(step),
+                    ordinal(first_pos)
+                ));
+            }
+            out.push_str(&format!("count: until end of input (step {step})"));
+        }
+        // end is exclusive 0-based, so the last selected 1-based position is `end`.
+        Some(end) => {
+            if start >= end {
+                out.push_str(&format!(
+                    "1-based: empty (start {first_pos} is at or past end {end})\n"
+                ));
+                out.push_str("count: 0");
+            } else {
                 if step == 1 {
                     out.push_str(&format!(
-                        "1-based: from the {} {unit} to the last {unit}\n",
-                        ordinal(first_pos)
+                        "1-based: from the {} {unit} to the {} {unit}\n",
+                        ordinal(first_pos),
+                        ordinal(end)
                     ));
                 } else {
                     out.push_str(&format!(
-                        "1-based: every {step}{} {unit} from the {} {unit} to the last {unit}\n",
+                        "1-based: every {step}{} {unit} from the {} {unit} up to the {} {unit}\n",
                         ordinal_suffix(step),
-                        ordinal(first_pos)
+                        ordinal(first_pos),
+                        ordinal(end)
                     ));
                 }
-                out.push_str(&format!("count: until end of input (step {step})"));
-            }
-            // end is exclusive 0-based, so the last selected 1-based position is `end`.
-            Some(end) => {
-                if self.start >= end {
-                    out.push_str(&format!(
-                        "1-based: empty (start {first_pos} is at or past end {end})\n"
-                    ));
-                    out.push_str("count: 0");
-                } else {
-                    if step == 1 {
-                        out.push_str(&format!(
-                            "1-based: from the {} {unit} to the {} {unit}\n",
-                            ordinal(first_pos),
-                            ordinal(end)
-                        ));
-                    } else {
-                        out.push_str(&format!(
-                            "1-based: every {step}{} {unit} from the {} {unit} up to the {} {unit}\n",
-                            ordinal_suffix(step),
-                            ordinal(first_pos),
-                            ordinal(end)
-                        ));
-                    }
-                    let span = end - self.start;
-                    let count = span.div_ceil(step);
-                    out.push_str(&format!("count: {count}"));
-                }
+                let span = end - start;
+                let count = span.div_ceil(step);
+                out.push_str(&format!("count: {count}"));
             }
         }
-        out.push('\n');
-        out
     }
+    out.push('\n');
+    out
+}
+
+/// Tail-relative end: the resolved bound is `length - back`, unknowable
+/// without reading the input, so positions are described symbolically.
+fn explain_lag(start: usize, back: NonZeroUsize, step: usize, unit: &str) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("start: {start}\n"));
+    out.push_str(&format!("end:   {back} from the end (exclusive)\n"));
+    out.push_str(&format!("step:  {step}\n"));
+
+    out.push_str(&format!(
+        "0-based: {unit}s at indices [{start}, length-{back})"
+    ));
+    if step != 1 {
+        out.push_str(&format!(", every {step} starting at {start}"));
+    }
+    out.push_str(", clamped to the input length\n");
+
+    let first_pos = start.saturating_add(1);
+    // The last index the bound admits is length-back-1, i.e. the (back+1)-th
+    // position counting back from the end.
+    let last_from_end = back.get().saturating_add(1);
+    if step == 1 {
+        out.push_str(&format!(
+            "1-based: from the {} {unit} to the {} {unit} from the end\n",
+            ordinal(first_pos),
+            ordinal(last_from_end)
+        ));
+    } else {
+        out.push_str(&format!(
+            "1-based: every {step}{} {unit} from the {} {unit} up to the {} {unit} from the end\n",
+            ordinal_suffix(step),
+            ordinal(first_pos),
+            ordinal(last_from_end)
+        ));
+    }
+    out.push_str("count: depends on the input length\n");
+    out
 }
 
 /// "1st", "2nd", "3rd", "4th" ...
@@ -181,6 +261,34 @@ fn ordinal_suffix(n: usize) -> &'static str {
         (_, 2) => "nd",
         (_, 3) => "rd",
         _ => "th",
+    }
+}
+
+/// Parse one bound of the range. A leading `-` followed by a bare digit string
+/// is tail-relative; anything else (`-`, `--1`, `-+1`) keeps the plain-integer
+/// parse error so rejection messages stay unchanged.
+fn parse_index(s: &str, field: RangeField) -> Result<Option<SliceIndex>, ParseSliceRangeError> {
+    match s.parse::<usize>() {
+        Ok(v) => Ok(Some(SliceIndex::FromStart(v))),
+        Err(err) if *err.kind() == IntErrorKind::Empty => Ok(None),
+        Err(source) => {
+            if let Some(magnitude) = s.strip_prefix('-') {
+                if magnitude.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+                    if let Ok(v) = magnitude.parse::<usize>() {
+                        return Ok(Some(match NonZeroUsize::new(v) {
+                            Some(back) => SliceIndex::FromEnd(back),
+                            // Python has no -0: it means the head, not the end.
+                            None => SliceIndex::FromStart(0),
+                        }));
+                    }
+                }
+            }
+            Err(ParseSliceRangeError::InvalidField {
+                field,
+                value: s.to_owned(),
+                source,
+            })
+        }
     }
 }
 
@@ -213,13 +321,16 @@ impl FromStr for SliceRange {
             let lines = relative_amount(amount)?;
             (
                 start.saturating_sub(lines),
-                Some(start.saturating_add(lines)),
+                Some(SliceIndex::FromStart(start.saturating_add(lines))),
             )
         } else if let Some(amount) = maybe_end.strip_prefix('+') {
             let lines = relative_amount(amount)?;
-            (start, Some(start.saturating_add(lines)))
+            (
+                start,
+                Some(SliceIndex::FromStart(start.saturating_add(lines))),
+            )
         } else {
-            (start, parse(maybe_end, RangeField::End)?)
+            (start, parse_index(maybe_end, RangeField::End)?)
         };
         let step = match ptn.next() {
             Some(step) => Some(parse(step, RangeField::Step)?.unwrap_or(NonZeroUsize::MIN)),
@@ -243,7 +354,7 @@ mod tests {
             slice,
             SliceRange {
                 start: 0,
-                end: Some(1),
+                end: Some(SliceIndex::FromStart(1)),
                 step: NonZeroUsize::new(1),
             }
         );
@@ -256,7 +367,7 @@ mod tests {
             slice,
             SliceRange {
                 start: 0,
-                end: Some(1),
+                end: Some(SliceIndex::FromStart(1)),
                 step: None,
             }
         );
@@ -265,7 +376,7 @@ mod tests {
             slice,
             SliceRange {
                 start: 0,
-                end: Some(1),
+                end: Some(SliceIndex::FromStart(1)),
                 step: NonZeroUsize::new(1),
             }
         );
@@ -278,7 +389,7 @@ mod tests {
             slice,
             SliceRange {
                 start: 0,
-                end: Some(1),
+                end: Some(SliceIndex::FromStart(1)),
                 step: NonZeroUsize::new(1),
             }
         );
@@ -343,7 +454,7 @@ mod tests {
         for whole in [":", "::", "0:", "0::", "::1", "0::1"] {
             assert_eq!(
                 SliceRange::from_str(whole).unwrap().plan(),
-                SlicePlan::Copy,
+                Plan::Resolved(SlicePlan::Copy),
                 "{whole} should select the whole input"
             );
         }
@@ -361,7 +472,7 @@ mod tests {
         ] {
             assert_eq!(
                 SliceRange::from_str(range).unwrap().plan(),
-                SlicePlan::Window { start, end },
+                Plan::Resolved(SlicePlan::Window { start, end }),
                 "{range} should be a contiguous window"
             );
         }
@@ -372,11 +483,11 @@ mod tests {
         for (range, start, end, step) in [("::2", 0, None, 2), ("1:8:2", 1, Some(8), 2)] {
             assert_eq!(
                 SliceRange::from_str(range).unwrap().plan(),
-                SlicePlan::Stepped {
+                Plan::Resolved(SlicePlan::Stepped {
                     start,
                     end,
                     step: NonZeroUsize::new(step).unwrap()
-                },
+                }),
                 "{range} must stay on the stepped pipeline"
             );
         }
@@ -384,10 +495,10 @@ mod tests {
 
     #[test]
     fn plan_empties_bounded_start_at_or_past_end() {
-        for empty in ["5:3", "5:5", ":0", "5:3:2", "5:+0"] {
+        for empty in ["5:3", "5:5", ":0", "5:3:2", "5:+0", ":-0"] {
             assert_eq!(
                 SliceRange::from_str(empty).unwrap().plan(),
-                SlicePlan::Empty,
+                Plan::Resolved(SlicePlan::Empty),
                 "{empty} selects nothing and must not read input"
             );
         }
@@ -398,7 +509,7 @@ mod tests {
         for (range, start, end) in [("0:1", 0, Some(1)), ("4:5", 4, Some(5))] {
             assert_eq!(
                 SliceRange::from_str(range).unwrap().plan(),
-                SlicePlan::Window { start, end },
+                Plan::Resolved(SlicePlan::Window { start, end }),
                 "{range} selects something and must stay a window"
             );
         }
@@ -411,7 +522,7 @@ mod tests {
             slice,
             SliceRange {
                 start: 1,
-                end: Some(2),
+                end: Some(SliceIndex::FromStart(2)),
                 step: None,
             }
         )
@@ -424,7 +535,7 @@ mod tests {
             slice,
             SliceRange {
                 start: 90,
-                end: Some(110),
+                end: Some(SliceIndex::FromStart(110)),
                 step: None,
             }
         )
@@ -437,10 +548,58 @@ mod tests {
             slice,
             SliceRange {
                 start: 0,
-                end: Some(15),
+                end: Some(SliceIndex::FromStart(15)),
                 step: None,
             }
         )
+    }
+
+    #[test]
+    fn negative_end() {
+        assert_eq!(
+            SliceRange::from_str(":-2").unwrap(),
+            SliceRange {
+                start: 0,
+                end: Some(SliceIndex::FromEnd(NonZeroUsize::new(2).unwrap())),
+                step: None,
+            }
+        );
+        assert_eq!(
+            SliceRange::from_str("5:-3:2").unwrap(),
+            SliceRange {
+                start: 5,
+                end: Some(SliceIndex::FromEnd(NonZeroUsize::new(3).unwrap())),
+                step: NonZeroUsize::new(2),
+            }
+        );
+        assert_eq!(
+            SliceRange::from_str(":-18446744073709551615").unwrap().end,
+            Some(SliceIndex::FromEnd(NonZeroUsize::new(usize::MAX).unwrap()))
+        );
+    }
+
+    #[test]
+    fn minus_zero_normalizes_to_head() {
+        assert_eq!(
+            SliceRange::from_str(":-0").unwrap().end,
+            Some(SliceIndex::FromStart(0))
+        );
+    }
+
+    #[test]
+    fn plan_defers_tail_relative_end() {
+        for (range, start, back, step) in [(":-2", 0, 2, 1), ("1:-1", 1, 1, 1), ("5:-3:2", 5, 3, 2)]
+        {
+            assert_eq!(
+                SliceRange::from_str(range).unwrap().plan(),
+                Plan::Deferred(DeferredPlan::Lag {
+                    start,
+                    back: NonZeroUsize::new(back).unwrap(),
+                    step: NonZeroUsize::new(step).unwrap(),
+                }),
+                "{range} needs the input length and must defer"
+            );
+        }
     }
 
     mod explain {
@@ -514,6 +673,24 @@ mod tests {
             let text = SliceRange::from_str("0:3").unwrap().explain("byte");
             assert!(text.contains("0-based: bytes at indices [0, 3)"));
             assert!(text.contains("from the 1st byte to the 3rd byte"));
+        }
+
+        #[test]
+        fn negative_end_count_depends_on_length() {
+            let text = SliceRange::from_str("2:-2").unwrap().explain("line");
+            assert!(text.contains("start: 2"));
+            assert!(text.contains("end:   2 from the end (exclusive)"));
+            assert!(text
+                .contains("0-based: lines at indices [2, length-2), clamped to the input length"));
+            assert!(text.contains("1-based: from the 3rd line to the 3rd line from the end"));
+            assert!(text.contains("count: depends on the input length"));
+
+            let stepped = SliceRange::from_str("1:-1:2").unwrap().explain("line");
+            assert!(stepped.contains("0-based: lines at indices [1, length-1), every 2 starting at 1, clamped to the input length"));
+            assert!(stepped.contains(
+                "1-based: every 2nd line from the 2nd line up to the 2nd line from the end"
+            ));
+            assert!(stepped.contains("count: depends on the input length"));
         }
     }
 
@@ -609,6 +786,68 @@ mod tests {
                     ..
                 }
             ));
+        }
+
+        #[test]
+        fn bare_minus_rejected() {
+            let err = SliceRange::from_str(":-").unwrap_err();
+            assert!(matches!(
+                err,
+                ParseSliceRangeError::InvalidField {
+                    field: RangeField::End,
+                    ..
+                }
+            ));
+            assert!(err.to_string().starts_with("invalid end value '-':"));
+        }
+
+        #[test]
+        fn double_minus_rejected() {
+            assert!(matches!(
+                SliceRange::from_str(":--1").unwrap_err(),
+                ParseSliceRangeError::InvalidField {
+                    field: RangeField::End,
+                    ..
+                }
+            ));
+        }
+
+        #[test]
+        fn minus_plus_rejected() {
+            assert!(matches!(
+                SliceRange::from_str(":-+1").unwrap_err(),
+                ParseSliceRangeError::InvalidField {
+                    field: RangeField::End,
+                    ..
+                }
+            ));
+        }
+
+        #[test]
+        fn negative_end_overflow_rejected() {
+            assert!(matches!(
+                SliceRange::from_str(":-18446744073709551616").unwrap_err(),
+                ParseSliceRangeError::InvalidField {
+                    field: RangeField::End,
+                    ..
+                }
+            ));
+        }
+
+        #[test]
+        fn negative_step_stays_rejected() {
+            for step in ["::-1", "::0"] {
+                assert!(
+                    matches!(
+                        SliceRange::from_str(step).unwrap_err(),
+                        ParseSliceRangeError::InvalidField {
+                            field: RangeField::Step,
+                            ..
+                        }
+                    ),
+                    "{step} must keep rejecting non-positive steps"
+                );
+            }
         }
     }
 }

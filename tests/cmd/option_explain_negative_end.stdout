@@ -1,0 +1,6 @@
+start: 0
+end:   2 from the end (exclusive)
+step:  1
+0-based: lines at indices [0, length-2), clamped to the input length
+1-based: from the 1st line to the 3rd line from the end
+count: depends on the input length
