@@ -10,7 +10,6 @@ use crate::{
 };
 use clap::{CommandFactory, Parser};
 use std::{
-    collections::VecDeque,
     fs,
     io::{self, stdin, stdout, BufRead, Read, Seek, SeekFrom, Write},
     num::NonZeroUsize,
@@ -281,9 +280,10 @@ fn byte_lag<R: BufRead, W: Write>(
     discard(&mut input, start as u64)?;
     let m = back.get();
     let step = step.get();
-    // Grown lazily toward m so a huge `:-m` never preallocates past the bytes
-    // actually seen.
-    let mut ring: VecDeque<u8> = VecDeque::new();
+    let mut ring: Vec<u8> = Vec::new();
+    // Bytes appended to the ring. Its window is [filled - ring.len(), filled)
+    // at slots p % m; everything before the window start is already emitted.
+    let mut filled: u64 = 0;
     let mut buf = Vec::new();
     let mut phase = 0;
     loop {
@@ -295,32 +295,38 @@ fn byte_lag<R: BufRead, W: Write>(
                 Err(err) => return Err(err),
             };
             let n = block.len();
-            if n >= m {
-                // The block alone re-fills the ring: everything held plus the
-                // block's own prefix is confirmed without touching the ring.
-                let (front, rear) = ring.as_slices();
-                emit_run(front, step, &mut phase, &mut buf, &mut output)?;
-                emit_run(rear, step, &mut phase, &mut buf, &mut output)?;
-                emit_run(&block[..n - m], step, &mut phase, &mut buf, &mut output)?;
-                ring.clear();
-                ring.extend(&block[n - m..]);
-            } else {
-                ring.extend(block);
-                let confirmed = ring.len().saturating_sub(m);
-                if confirmed > 0 {
-                    let (front, rear) = ring.as_slices();
-                    let take = confirmed.min(front.len());
-                    emit_run(&front[..take], step, &mut phase, &mut buf, &mut output)?;
-                    emit_run(
-                        &rear[..confirmed - take],
-                        step,
-                        &mut phase,
-                        &mut buf,
-                        &mut output,
-                    )?;
-                    ring.drain(..confirmed);
-                }
+            // The block confirms every byte more than m behind the new total:
+            // the ring window's prefix, then — when the block outsizes the
+            // ring — the block's own prefix. Both are emitted before
+            // ring_extend overwrites exactly those slots.
+            let window_start = filled - ring.len() as u64;
+            let confirmed = (filled + n as u64).saturating_sub(m as u64);
+            let from_ring =
+                (confirmed.saturating_sub(window_start)).min(ring.len() as u64) as usize;
+            if from_ring > 0 {
+                let pos = (window_start % m as u64) as usize;
+                let first = from_ring.min(ring.len() - pos);
+                emit_run(
+                    &ring[pos..pos + first],
+                    step,
+                    &mut phase,
+                    &mut buf,
+                    &mut output,
+                )?;
+                emit_run(
+                    &ring[..from_ring - first],
+                    step,
+                    &mut phase,
+                    &mut buf,
+                    &mut output,
+                )?;
             }
+            if confirmed > filled {
+                let prefix = (confirmed - filled) as usize;
+                emit_run(&block[..prefix], step, &mut phase, &mut buf, &mut output)?;
+            }
+            ring_extend(&mut ring, m, filled, block);
+            filled += n as u64;
             n
         };
         input.consume(used);
