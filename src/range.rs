@@ -104,7 +104,6 @@ impl SliceRange {
         }
         out.push_str(&format!("step:  {step}\n"));
 
-        // 0-based selection, end exclusive.
         match self.end {
             None => out.push_str(&format!(
                 "0-based: {unit}s at indices [{}, end of input)",
