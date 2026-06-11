@@ -51,6 +51,7 @@ If `<file>` is not specified, `slice` will read from standard input.
 
 The slice syntax is similar to Python's slice syntax, with the format `start:end:step`.
 Each value is optional and, if omitted, defaults to the beginning of the file, the end of the file, and a step of 1, respectively.
+Negative `start` and `end` values count back from the end of the input, exactly like Python: `-N` means `length - N`, and out-of-range values clamp to the input instead of erroring.
 
 ## Examples
 
@@ -73,6 +74,32 @@ slice 5:+10 file.txt
 ```
 
 This command is the same as `slice` 5:15 file.txt`.
+
+```sh
+slice -5: file.txt
+```
+
+This command prints the last five lines of `file.txt`, like `tail -n 5`. The
+usual `head`/`tail` invocations map onto tail-relative slices:
+
+| Command              | Equivalent            |
+| -------------------- | --------------------- |
+| `slice -5: file`     | `tail -n 5 file`      |
+| `slice -b -5: file`  | `tail -c 5 file`      |
+| `slice :-5 file`     | `head -n -5 file` (GNU) |
+| `slice -b :-5 file`  | `head -c -5 file` (GNU) |
+
+The bounds follow Python rather than coreutils where the two disagree: `-0`
+equals `0`, so `slice -0:` selects the whole input (where `tail -n 0` selects
+nothing) and `slice :-0` selects nothing (where GNU `head -n -0` selects
+everything).
+
+A tail-relative `start` (`-N:`) cannot emit anything until the input ends, and
+holds the last `N` elements in memory while it reads — the same shape as
+`tail`. A tail-relative `end` (`:-N`) stays streaming: each element is emitted
+as soon as `N` more have arrived, so only `N` elements are ever held. In byte
+mode on regular files both forms resolve against the file size up front and
+seek straight to the data, buffering nothing.
 
 ```sh
 find . -type f -print0 | slice 0:100 -z
