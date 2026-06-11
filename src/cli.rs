@@ -37,7 +37,8 @@ pub(crate) struct Args {
         allow_hyphen_values = true,
         help = "The slice syntax is similar to Python's slice syntax, with the format `start:end:step`.
 Each value is optional and, if omitted, defaults to the start of the file, the end of the file, and a step of 1, respectively.
-e.g., '50:100', '50:100:1'
+Negative start/end values count back from the end of the input, like Python.
+e.g., '50:100', '50:100:1', '-5:'
 and the extended syntax 'start:+line' is supported. (experimental)
 e.g., '50:+50'"
     )]
