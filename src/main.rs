@@ -5,17 +5,20 @@ mod ext;
 mod range;
 
 use crate::{
-    ext::{slice_stepped, slice_window, Byte, Bytes},
-    range::{SlicePlan, SliceRange},
+    ext::{slice_lag, slice_stepped, slice_window, Byte, Bytes},
+    range::{DeferredPlan, Plan, SlicePlan, SliceRange},
 };
 use clap::{CommandFactory, Parser};
 use std::{
+    collections::VecDeque,
     fs,
     io::{self, stdin, stdout, BufRead, Read, Seek, SeekFrom, Write},
     num::NonZeroUsize,
     path::{Path, PathBuf},
     process::ExitCode,
 };
+
+const WRITE_BUF_SIZE: usize = 8 * 1024;
 
 enum SliceMode<'b> {
     Lines,
@@ -99,7 +102,6 @@ fn byte_mode<R: BufRead, W: Write>(
     end: Option<usize>,
     step: NonZeroUsize,
 ) -> io::Result<()> {
-    const WRITE_BUF_SIZE: usize = 8 * 1024;
     let mut remaining = end.map(|end| end.saturating_sub(start));
     if remaining == Some(0) {
         return output.flush();
@@ -237,6 +239,132 @@ where
     }
 }
 
+// Emit the stride-selected bytes of one confirmed segment. `phase` is the
+// offset of the next selected byte relative to the segment start; on return it
+// is relative to the segment end, so consecutive segments share one stride.
+#[inline]
+fn emit_run<W: Write>(
+    seg: &[u8],
+    step: usize,
+    phase: &mut usize,
+    buf: &mut Vec<u8>,
+    output: &mut W,
+) -> io::Result<()> {
+    if step == 1 {
+        return output.write_all(seg);
+    }
+    let mut p = *phase;
+    while p < seg.len() {
+        buf.push(seg[p]);
+        if buf.len() == WRITE_BUF_SIZE {
+            output.write_all(buf)?;
+            buf.clear();
+        }
+        p = p.saturating_add(step);
+    }
+    *phase = p - seg.len();
+    Ok(())
+}
+
+/// GNU `head -c -N` equivalent generalized with start/step: bytes ride a ring
+/// of the last `back` bytes seen and one is confirmed (emitted, stride
+/// permitting) once `back` more bytes arrive, so at EOF the ring holds exactly
+/// the dropped tail. Reaches only non-seekable inputs, so the leading `start`
+/// bytes are read-discarded.
+fn byte_lag<R: BufRead, W: Write>(
+    mut input: R,
+    mut output: W,
+    start: usize,
+    back: NonZeroUsize,
+    step: NonZeroUsize,
+) -> io::Result<()> {
+    discard(&mut input, start as u64)?;
+    let m = back.get();
+    let step = step.get();
+    // Grown lazily toward m so a huge `:-m` never preallocates past the bytes
+    // actually seen.
+    let mut ring: VecDeque<u8> = VecDeque::new();
+    let mut buf = Vec::new();
+    let mut phase = 0;
+    loop {
+        let used = {
+            let block = match input.fill_buf() {
+                Ok([]) => break,
+                Ok(block) => block,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) => return Err(err),
+            };
+            let n = block.len();
+            if n >= m {
+                // The block alone re-fills the ring: everything held plus the
+                // block's own prefix is confirmed without touching the ring.
+                let (front, rear) = ring.as_slices();
+                emit_run(front, step, &mut phase, &mut buf, &mut output)?;
+                emit_run(rear, step, &mut phase, &mut buf, &mut output)?;
+                emit_run(&block[..n - m], step, &mut phase, &mut buf, &mut output)?;
+                ring.clear();
+                ring.extend(&block[n - m..]);
+            } else {
+                ring.extend(block);
+                let confirmed = ring.len().saturating_sub(m);
+                if confirmed > 0 {
+                    let (front, rear) = ring.as_slices();
+                    let take = confirmed.min(front.len());
+                    emit_run(&front[..take], step, &mut phase, &mut buf, &mut output)?;
+                    emit_run(
+                        &rear[..confirmed - take],
+                        step,
+                        &mut phase,
+                        &mut buf,
+                        &mut output,
+                    )?;
+                    ring.drain(..confirmed);
+                }
+            }
+            n
+        };
+        input.consume(used);
+    }
+    if !buf.is_empty() {
+        output.write_all(&buf)?;
+    }
+    output.flush()
+}
+
+#[inline]
+fn delimit_lag<R: BufRead, W: Write>(
+    input: R,
+    output: W,
+    delimiter: &[u8],
+    start: usize,
+    back: NonZeroUsize,
+    step: NonZeroUsize,
+) -> io::Result<()> {
+    debug_assert!(!delimiter.is_empty(), "empty delimiter is byte mode");
+    match delimiter {
+        &[b] => slice_lag(Byte(b), input, output, start, back, step),
+        multi => slice_lag(Bytes::new(multi), input, output, start, back, step),
+    }
+}
+
+#[inline]
+fn apply_deferred<R: BufRead, W: Write>(
+    mode: &SliceMode,
+    input: R,
+    output: W,
+    plan: DeferredPlan,
+) -> io::Result<()> {
+    match plan {
+        DeferredPlan::Lag { start, back, step } => match mode {
+            SliceMode::Lines => slice_lag(Byte(b'\n'), input, output, start, back, step),
+            SliceMode::Bytes => byte_lag(input, output, start, back, step),
+            SliceMode::Custom(delimiter) => {
+                delimit_lag(input, output, delimiter, start, back, step)
+            }
+        },
+    }
+}
+
 fn report_error(path: &Path, err: &io::Error) {
     eprintln!("slice: {}: {}", path.display(), err);
 }
@@ -324,7 +452,10 @@ fn entry(args: cli::Args) -> bool {
     if args.files.is_empty() {
         let input = buf_reader(stdin().lock(), io_buffer_size);
         let output = buf_writer(stdout().lock(), io_buffer_size);
-        let result = apply(&mode, input, output, plan, discard);
+        let result = match plan {
+            Plan::Resolved(plan) => apply(&mode, input, output, plan, discard),
+            Plan::Deferred(deferred) => apply_deferred(&mode, input, output, deferred),
+        };
         stdout_status(result)
     } else {
         // A single file never gets a header, so -q only matters for 2+ files.
@@ -335,14 +466,15 @@ fn entry(args: cli::Args) -> bool {
             output,
             |input| buf_reader(input, io_buffer_size),
             print_header,
-            |input, output| {
-                apply(
+            |input, output| match plan {
+                Plan::Resolved(plan) => apply(
                     &mode,
                     input,
                     output,
                     plan,
                     |r: &mut io::BufReader<fs::File>, n| r.seek(SeekFrom::Start(n)).map(drop),
-                )
+                ),
+                Plan::Deferred(deferred) => apply_deferred(&mode, input, output, deferred),
             },
         )
     }
@@ -359,20 +491,43 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::range::SliceIndex;
     use std::str::FromStr;
+
+    // The driver helpers below take absolute offsets; tail-relative ends have
+    // their own deferred drivers and never reach them.
+    fn bounds(range: &SliceRange) -> (usize, Option<usize>) {
+        let end = range.end.map(|end| match end {
+            SliceIndex::FromStart(end) => end,
+            SliceIndex::FromEnd(_) => panic!("helper drives head-relative ranges"),
+        });
+        (range.start, end)
+    }
+
+    fn resolved_plan_of(range: &SliceRange) -> SlicePlan {
+        match range.plan() {
+            Plan::Resolved(plan) => plan,
+            Plan::Deferred(_) => panic!("expected a statically resolved plan"),
+        }
+    }
+
+    fn resolved_plan(range: &str) -> SlicePlan {
+        resolved_plan_of(&SliceRange::from_str(range).unwrap())
+    }
 
     mod line {
         use super::*;
 
         fn lined(input: &[u8], range: &str) -> Vec<u8> {
             let range = SliceRange::from_str(range).unwrap();
+            let (start, end) = bounds(&range);
             let mut out = Vec::new();
             slice_stepped(
                 Byte(b'\n'),
                 input,
                 &mut out,
-                range.start,
-                range.end,
+                start,
+                end,
                 range.step.unwrap_or(NonZeroUsize::MIN),
             )
             .expect("");
@@ -615,11 +770,12 @@ mod tests {
             let file = temp_file(b"line one\nline two\n");
             let reader = io::BufReader::new(fs::File::open(&file).expect("open temp file"));
             let range = SliceRange::from_str("0:3").unwrap();
+            let (start, end) = bounds(&range);
             let err = byte_window(
                 reader,
                 BrokenPipeWriter,
-                range.start,
-                range.end,
+                start,
+                end,
                 |r: &mut io::BufReader<fs::File>, n| r.seek(SeekFrom::Start(n)).map(drop),
             )
             .expect_err("a broken pipe must propagate from the window path");
@@ -636,14 +792,9 @@ mod tests {
             for range in ["1:", "0:3"] {
                 let reader = io::BufReader::new(fs::File::open(&file).expect("open temp file"));
                 let range = SliceRange::from_str(range).unwrap();
-                let err = slice_window(
-                    Byte(b'\n'),
-                    reader,
-                    BrokenPipeWriter,
-                    range.start,
-                    range.end,
-                )
-                .expect_err("a broken pipe must propagate from slice_window");
+                let (start, end) = bounds(&range);
+                let err = slice_window(Byte(b'\n'), reader, BrokenPipeWriter, start, end)
+                    .expect_err("a broken pipe must propagate from slice_window");
                 assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
             }
             fs::remove_file(&file).ok();
@@ -654,18 +805,45 @@ mod tests {
             let file = temp_file(b"line one\nline two\nline three\n");
             let reader = io::BufReader::new(fs::File::open(&file).expect("open temp file"));
             let range = SliceRange::from_str("::2").unwrap();
+            let (start, end) = bounds(&range);
             let err = slice_stepped(
                 Byte(b'\n'),
                 reader,
                 BrokenPipeWriter,
-                range.start,
-                range.end,
+                start,
+                end,
                 range.step.unwrap(),
             )
             .expect_err("a broken pipe must propagate from slice_stepped");
             fs::remove_file(&file).ok();
 
             assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        }
+
+        // Lag emission happens mid-stream (a chunk is written once its m-th
+        // successor lands), so the failure must surface from inside the loop.
+        #[test]
+        fn lag_emission_propagates_broken_pipe() {
+            let err = slice_lag(
+                Byte(b'\n'),
+                &b"a\nb\nc\n"[..],
+                BrokenPipeWriter,
+                0,
+                NonZeroUsize::MIN,
+                NonZeroUsize::MIN,
+            )
+            .expect_err("a broken pipe must propagate from slice_lag");
+            assert!(is_broken_pipe(&err));
+
+            let err = byte_lag(
+                &b"abcdefghij"[..],
+                BrokenPipeWriter,
+                0,
+                NonZeroUsize::MIN,
+                NonZeroUsize::MIN,
+            )
+            .expect_err("a broken pipe must propagate from byte_lag");
+            assert!(is_broken_pipe(&err));
         }
     }
 
@@ -677,12 +855,13 @@ mod tests {
 
         fn byted(input: &[u8], range: &str) -> Vec<u8> {
             let range = SliceRange::from_str(range).unwrap();
+            let (start, end) = bounds(&range);
             let mut out = Vec::new();
             byte_mode(
                 input,
                 &mut out,
-                range.start,
-                range.end,
+                start,
+                end,
                 range.step.unwrap_or(NonZeroUsize::MIN),
             )
             .expect("");
@@ -799,8 +978,9 @@ mod tests {
 
         fn windowed(input: &[u8], range: &str) -> Vec<u8> {
             let range = SliceRange::from_str(range).unwrap();
+            let (start, end) = bounds(&range);
             let mut out = Vec::new();
-            byte_window(input, &mut out, range.start, range.end, discard).expect("");
+            byte_window(input, &mut out, start, end, discard).expect("");
             out
         }
 
@@ -881,19 +1061,21 @@ mod tests {
         }
 
         fn via_discard(input: &[u8], range: &SliceRange) -> Vec<u8> {
+            let (start, end) = bounds(range);
             let mut out = Vec::new();
-            byte_window(input, &mut out, range.start, range.end, discard).expect("");
+            byte_window(input, &mut out, start, end, discard).expect("");
             out
         }
 
         fn via_seek(path: &Path, range: &SliceRange) -> Vec<u8> {
+            let (start, end) = bounds(range);
             let reader = io::BufReader::new(fs::File::open(path).expect("open temp file"));
             let mut out = Vec::new();
             byte_window(
                 reader,
                 &mut out,
-                range.start,
-                range.end,
+                start,
+                end,
                 |r: &mut io::BufReader<fs::File>, n| r.seek(SeekFrom::Start(n)).map(drop),
             )
             .expect("");
@@ -914,6 +1096,118 @@ mod tests {
                 );
             }
             fs::remove_file(&path).ok();
+        }
+    }
+
+    mod byte_lag {
+        use super::*;
+        use crate::ext::IteratorExt;
+
+        fn lagged_at(
+            input: &[u8],
+            start: usize,
+            m: usize,
+            step: usize,
+            capacity: usize,
+        ) -> Vec<u8> {
+            let reader = io::BufReader::with_capacity(capacity, input);
+            let mut out = Vec::new();
+            byte_lag(
+                reader,
+                &mut out,
+                start,
+                NonZeroUsize::new(m).unwrap(),
+                NonZeroUsize::new(step).unwrap(),
+            )
+            .expect("");
+            out
+        }
+
+        fn lagged(input: &[u8], start: usize, m: usize, step: usize) -> Vec<u8> {
+            lagged_at(input, start, m, step, 8 * 1024)
+        }
+
+        #[test]
+        fn drops_tail_bytes() {
+            assert_eq!(lagged(b"abcdefghij", 0, 3, 1), b"abcdefg");
+        }
+
+        #[test]
+        fn window_with_stride() {
+            assert_eq!(lagged(b"abcdefghij", 2, 2, 2), b"ceg");
+        }
+
+        #[test]
+        fn back_at_or_past_len_is_empty() {
+            assert_eq!(lagged(b"abc", 0, 100, 1), b"");
+            assert_eq!(lagged(b"abc", 0, 3, 1), b"");
+        }
+
+        #[test]
+        fn start_inside_dropped_tail_is_empty() {
+            assert_eq!(lagged(b"abcdefghij", 8, 5, 1), b"");
+            assert_eq!(lagged(b"abcdefghij", 100, 1, 1), b"");
+        }
+
+        #[test]
+        fn empty_input() {
+            assert_eq!(lagged(b"", 0, 1, 1), b"");
+        }
+
+        #[test]
+        fn binary_is_preserved_byte_exact() {
+            let input = b"sl\xaace\xaabinary\x00stream";
+            assert_eq!(lagged(input, 0, 6, 1), b"sl\xaace\xaabinary\x00");
+        }
+
+        #[test]
+        fn stride_crosses_write_buffer_boundary() {
+            // 64 KiB input with m=5 leaves >8 KiB of selected output at step 2,
+            // forcing the batch buffer to flush mid-run.
+            let input: Vec<u8> = (0..64 * 1024u32).map(|i| (i % 251) as u8).collect();
+            for step in [1usize, 2, 3] {
+                let end = input.len() - 5;
+                let expected: Vec<u8> = input
+                    .iter()
+                    .copied()
+                    .slice(0, Some(end), NonZeroUsize::new(step))
+                    .collect();
+                assert_eq!(lagged(&input, 0, 5, step), expected, "step {step}");
+            }
+        }
+
+        #[test]
+        fn parity_with_iterator_oracle() {
+            // Patterned non-UTF-8 input; the prime length avoids lining up
+            // with any of the reader capacities below.
+            let input: Vec<u8> = (0..1031u32)
+                .map(|i| match i % 7 {
+                    0 => 0x00,
+                    3 => 0xaa,
+                    _ => (i % 251) as u8,
+                })
+                .collect();
+            for start in [0usize, 1, 5, 100, 2000] {
+                for m in [1usize, 2, 3, 7, 250, 1031, 100_000] {
+                    for step in [1usize, 2, 3, 7] {
+                        let end = input.len().saturating_sub(m);
+                        let expected: Vec<u8> = input
+                            .iter()
+                            .copied()
+                            .slice(start, Some(end), NonZeroUsize::new(step))
+                            .collect();
+                        // Capacity 1 keeps every block below m (ring growth and
+                        // wrap), 8192 covers single blocks larger than m.
+                        for capacity in [1, 3, 8192] {
+                            assert_eq!(
+                                lagged_at(&input, start, m, step, capacity),
+                                expected,
+                                "start={start} m={m} step={step} capacity={capacity}"
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -943,14 +1237,7 @@ mod tests {
 
         fn applied(mode: SliceMode, range: &str) -> Vec<u8> {
             let mut out = Vec::new();
-            apply(
-                &mode,
-                INPUT,
-                &mut out,
-                SliceRange::from_str(range).unwrap().plan(),
-                discard,
-            )
-            .expect("");
+            apply(&mode, INPUT, &mut out, resolved_plan(range), discard).expect("");
             out
         }
 
@@ -986,7 +1273,7 @@ mod tests {
                 &SliceMode::Lines,
                 b"a\nb\nc\n".as_slice(),
                 &mut out,
-                SliceRange::from_str("1:").unwrap().plan(),
+                resolved_plan("1:"),
                 discard,
             )
             .expect("");
@@ -999,12 +1286,13 @@ mod tests {
             // stepped driver run at step 1 for every delimiter shape.
             fn agree(delimiter: &[u8], input: &[u8], range: &str) -> Vec<u8> {
                 let range = SliceRange::from_str(range).unwrap();
+                let (start, end) = bounds(&range);
                 let mut via_apply = Vec::new();
                 apply(
                     &SliceMode::Custom(delimiter),
                     input,
                     &mut via_apply,
-                    range.plan(),
+                    resolved_plan_of(&range),
                     discard,
                 )
                 .expect("");
@@ -1013,8 +1301,8 @@ mod tests {
                     input,
                     &mut via_stepped,
                     delimiter,
-                    range.start,
-                    range.end,
+                    start,
+                    end,
                     range.step.unwrap_or(NonZeroUsize::MIN),
                 )
                 .expect("");
@@ -1034,15 +1322,22 @@ mod tests {
 
         // slice_mode is the production routing entry() uses; the empty
         // delimiter must land in byte mode and produce byte-identical output
-        // across every plan shape (Copy, Window, Stepped, Empty).
+        // across every plan shape (Copy, Window, Stepped, Empty, Lag).
         #[test]
         fn routes_through_byte_machinery() {
             const INPUT: &[u8] = b"slice\xaabinary\nstream";
-            for range in ["::", "1:", ":3", "2:5", "::2", "1::3", "5:3"] {
+            for range in ["::", "1:", ":3", "2:5", "::2", "1::3", "5:3", ":-2"] {
                 let plan = SliceRange::from_str(range).unwrap().plan();
                 let apply_with = |mode: &SliceMode| {
                     let mut out = Vec::new();
-                    apply(mode, INPUT, &mut out, plan, discard).expect("");
+                    match plan {
+                        Plan::Resolved(plan) => {
+                            apply(mode, INPUT, &mut out, plan, discard).expect("")
+                        }
+                        Plan::Deferred(deferred) => {
+                            apply_deferred(mode, INPUT, &mut out, deferred).expect("")
+                        }
+                    }
                     out
                 };
                 assert_eq!(
@@ -1089,14 +1384,8 @@ mod tests {
 
         fn applied(mode: SliceMode, range: &str) -> Vec<u8> {
             let mut out = Vec::new();
-            apply(
-                &mode,
-                NoReadReader,
-                &mut out,
-                SliceRange::from_str(range).unwrap().plan(),
-                discard,
-            )
-            .expect("an empty plan must succeed without reading input");
+            apply(&mode, NoReadReader, &mut out, resolved_plan(range), discard)
+                .expect("an empty plan must succeed without reading input");
             out
         }
 
@@ -1130,8 +1419,9 @@ mod tests {
 
         fn windowed(input: &[u8], range: &str) -> Vec<u8> {
             let range = SliceRange::from_str(range).unwrap();
+            let (start, end) = bounds(&range);
             let mut out = Vec::new();
-            slice_window(Byte(b'\n'), input, &mut out, range.start, range.end).expect("");
+            slice_window(Byte(b'\n'), input, &mut out, start, end).expect("");
             out
         }
 

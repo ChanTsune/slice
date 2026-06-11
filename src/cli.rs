@@ -141,6 +141,7 @@ fn unescape(s: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::range::SliceIndex;
     use std::num::NonZeroUsize;
 
     #[test]
@@ -193,7 +194,7 @@ mod tests {
             args.range,
             SliceRange {
                 start: 10,
-                end: Some(20),
+                end: Some(SliceIndex::FromStart(20)),
                 step: None,
             }
         );

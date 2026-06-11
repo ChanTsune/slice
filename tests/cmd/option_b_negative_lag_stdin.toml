@@ -1,0 +1,3 @@
+bin.name = "slice"
+args = ["-b", ":-3"]
+status.code = 0

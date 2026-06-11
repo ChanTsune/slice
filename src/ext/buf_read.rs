@@ -1,6 +1,7 @@
 use crate::ext::IteratorExt;
 use memchr::memmem;
 use std::{
+    collections::VecDeque,
     io::{self, BufRead, Write},
     num::NonZeroUsize,
 };
@@ -314,6 +315,62 @@ pub(crate) fn slice_stepped<S: Split, R: BufRead, W: Write>(
             break;
         }
         index += 1;
+    }
+    output.flush()
+}
+
+/// Tail-relative end (`start:-m`): chunk i is selected iff i < L - m, certain
+/// once chunk i + m has been read, so emission lags m chunks. Only
+/// stride-selected chunks carry payload (the rest advance via `skip`): memory
+/// is O(ceil(m/step)) entries, recycled through a free pool.
+pub(crate) fn slice_lag<S: Split, R: BufRead, W: Write>(
+    split: S,
+    mut input: R,
+    mut output: W,
+    start: usize,
+    back: NonZeroUsize,
+    step: NonZeroUsize,
+) -> io::Result<()> {
+    if split.skip_n(&mut input, start)? < start {
+        return output.flush();
+    }
+    let m = back.get();
+    let step = step.get();
+    // (absolute chunk index, payload), oldest first.
+    let mut pending: VecDeque<(usize, Vec<u8>)> = VecDeque::new();
+    let mut free: Vec<Vec<u8>> = Vec::new();
+    // Absolute index of the next chunk to read.
+    let mut next = start;
+    loop {
+        let selected = (next - start) % step == 0;
+        let len = if selected {
+            let mut buf = free.pop().unwrap_or_default();
+            buf.clear();
+            let len = split.read_to(&mut input, &mut buf)?;
+            if len > 0 {
+                pending.push_back((next, buf));
+            } else {
+                free.push(buf);
+            }
+            len
+        } else {
+            split.skip(&mut input)?
+        };
+        if len == 0 {
+            // EOF: whatever is still pending lies within the dropped tail.
+            break;
+        }
+        next += 1;
+        // Chunk i survives iff i + m < next; checked after the `next` increment
+        // so the read proving the m-th successor exists has already landed.
+        while pending
+            .front()
+            .is_some_and(|&(i, _)| i.saturating_add(m) < next)
+        {
+            let (_, buf) = pending.pop_front().expect("front was just matched");
+            output.write_all(&buf)?;
+            free.push(buf);
+        }
     }
     output.flush()
 }
@@ -890,6 +947,129 @@ mod tests {
         }
         for input in [&b""[..], b"a||b||c||", b"a||b||c", b"abc", b"|"] {
             assert_read_to_eof_contract(Bytes::new(b"||"), input);
+        }
+    }
+
+    mod lag {
+        use super::*;
+
+        fn lagged<S: Split>(
+            split: S,
+            input: &[u8],
+            start: usize,
+            m: usize,
+            step: usize,
+            capacity: usize,
+        ) -> Vec<u8> {
+            let mut out = Vec::new();
+            slice_lag(
+                split,
+                BufReader::with_capacity(capacity, input),
+                &mut out,
+                start,
+                NonZeroUsize::new(m).unwrap(),
+                NonZeroUsize::new(step).unwrap(),
+            )
+            .unwrap();
+            out
+        }
+
+        const INPUT: &[u8] = b"a\nb\nc\nd\ne\n";
+
+        #[test]
+        fn drops_tail_chunks() {
+            assert_eq!(lagged(Byte(b'\n'), INPUT, 0, 2, 1, 8 * 1024), b"a\nb\nc\n");
+        }
+
+        #[test]
+        fn unterminated_final_chunk_counts() {
+            assert_eq!(
+                lagged(Byte(b'\n'), b"a\nb\nc\nd\ne", 0, 2, 1, 8 * 1024),
+                b"a\nb\nc\n"
+            );
+        }
+
+        #[test]
+        fn start_offset() {
+            assert_eq!(lagged(Byte(b'\n'), INPUT, 1, 1, 1, 8 * 1024), b"b\nc\nd\n");
+        }
+
+        #[test]
+        fn stride() {
+            assert_eq!(lagged(Byte(b'\n'), INPUT, 1, 1, 2, 8 * 1024), b"b\nd\n");
+        }
+
+        // A chunk is emitted only once its m-th successor has been read, so
+        // the chunk right before EOF must stay back.
+        #[test]
+        fn chunk_before_eof_is_not_emitted() {
+            assert_eq!(lagged(Byte(b'\n'), b"a\nb", 0, 1, 1, 8 * 1024), b"a\n");
+            assert_eq!(lagged(Byte(b'\n'), b"a\n", 0, 1, 1, 8 * 1024), b"");
+        }
+
+        #[test]
+        fn back_at_or_past_len_is_empty() {
+            assert_eq!(lagged(Byte(b'\n'), INPUT, 0, 5, 1, 8 * 1024), b"");
+            assert_eq!(lagged(Byte(b'\n'), INPUT, 0, 100, 1, 8 * 1024), b"");
+        }
+
+        #[test]
+        fn start_past_eof_is_empty() {
+            assert_eq!(lagged(Byte(b'\n'), INPUT, 10, 1, 1, 8 * 1024), b"");
+        }
+
+        #[test]
+        fn crossed_bounds_are_empty() {
+            assert_eq!(lagged(Byte(b'\n'), INPUT, 2, 5, 1, 8 * 1024), b"");
+        }
+
+        #[test]
+        fn empty_input() {
+            assert_eq!(lagged(Byte(b'\n'), b"", 0, 1, 1, 8 * 1024), b"");
+        }
+
+        #[test]
+        fn binary_chunks_round_trip() {
+            let input = b"sl\xaace\nbin\xff\nslice\xaa";
+            assert_eq!(
+                lagged(Byte(b'\n'), input, 0, 1, 1, 8 * 1024),
+                b"sl\xaace\nbin\xff\n"
+            );
+        }
+
+        fn assert_lag_parity<S: Split + Copy>(split: S, input: &[u8]) {
+            let total = chunks(split, input).len();
+            for start in [0usize, 1, 2, 5] {
+                for m in [1usize, 2, 3, 7, 100] {
+                    for &step in STEPS {
+                        let step = NonZeroUsize::new(step).unwrap();
+                        let expected = reference(
+                            split,
+                            input,
+                            start,
+                            Some(total.saturating_sub(m)),
+                            Some(step),
+                        );
+                        for capacity in [1, 2, 3, 8 * 1024] {
+                            assert_eq!(
+                                lagged(split, input, start, m, step.get(), capacity),
+                                expected,
+                                "slice_lag diverged for {start}:-{m}:{step} capacity {capacity} on {input:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn lag_parity_with_slice_oracle() {
+            assert_lag_parity(ByteRef(b'\n'), b"a\nb\nc\nd\ne\n");
+            assert_lag_parity(ByteRef(b'\n'), b"a\nb\nc\nd\ne");
+            assert_lag_parity(ByteRef(0), b"a\0b\0c\0");
+            assert_lag_parity(BytesRef(b"||"), b"a||b||c||d||");
+            assert_lag_parity(BytesRef(b"||"), b"a|||b|");
+            assert_lag_parity(BytesRef(b"aaa"), b"aaaaaa");
         }
     }
 }
