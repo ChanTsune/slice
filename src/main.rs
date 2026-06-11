@@ -545,6 +545,14 @@ fn multi<W: Write, R: BufRead, IW: Fn(fs::File) -> R, F: Fn(R, &mut W) -> io::Re
     ok
 }
 
+/// Byte counts are trustworthy only for regular files: FIFOs and procfs-style
+/// files report 0 (or lie), and a 0-length regular file streams to the same
+/// empty output anyway.
+fn regular_len(file: &fs::File) -> Option<u64> {
+    let metadata = file.metadata().ok()?;
+    (metadata.is_file() && metadata.len() > 0).then_some(metadata.len())
+}
+
 fn entry(args: cli::Args) -> bool {
     let io_buffer_size = args.io_buffer_size();
     let delimiter = match args.delimiter() {
@@ -583,15 +591,24 @@ fn entry(args: cli::Args) -> bool {
             output,
             |input| buf_reader(input, io_buffer_size),
             print_header,
-            |input, output| match plan {
-                Plan::Resolved(plan) => apply(
-                    &mode,
-                    input,
-                    output,
-                    plan,
-                    |r: &mut io::BufReader<fs::File>, n| r.seek(SeekFrom::Start(n)).map(drop),
-                ),
-                Plan::Deferred(deferred) => apply_deferred(&mode, input, output, deferred),
+            |input: io::BufReader<fs::File>, output| {
+                let seek =
+                    |r: &mut io::BufReader<fs::File>, n| r.seek(SeekFrom::Start(n)).map(drop);
+                match plan {
+                    Plan::Resolved(plan) => apply(&mode, input, output, plan, seek),
+                    Plan::Deferred(deferred) => {
+                        // Byte offsets resolve against the file size, rejoining
+                        // the seek/copy fast paths; line/delimiter counts stay
+                        // unknowable up front, so those keep streaming.
+                        let len = matches!(mode, SliceMode::Bytes)
+                            .then(|| regular_len(input.get_ref()))
+                            .flatten();
+                        match len.and_then(|len| deferred.resolve(len)) {
+                            Some(plan) => apply(&mode, input, output, plan, seek),
+                            None => apply_deferred(&mode, input, output, deferred),
+                        }
+                    }
+                }
             },
         )
     }
@@ -1242,6 +1259,93 @@ mod tests {
                 );
             }
             fs::remove_file(&path).ok();
+        }
+    }
+
+    mod deferred_resolution {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        fn deferred(range: &str) -> DeferredPlan {
+            match SliceRange::from_str(range).unwrap().plan() {
+                Plan::Deferred(deferred) => deferred,
+                Plan::Resolved(plan) => panic!("{range} must defer, resolved to {plan:?}"),
+            }
+        }
+
+        // The byte fast path: resolve against the known length, then run the
+        // resolved plan with a seeking skip, as entry() does for regular files.
+        fn via_resolved(input: &[u8], plan: DeferredPlan) -> Vec<u8> {
+            let plan = plan.resolve(input.len() as u64).expect("length fits usize");
+            let mut out = Vec::new();
+            apply(
+                &SliceMode::Bytes,
+                io::Cursor::new(input),
+                &mut out,
+                plan,
+                |r: &mut io::Cursor<&[u8]>, n| r.seek(SeekFrom::Start(n)).map(drop),
+            )
+            .expect("");
+            out
+        }
+
+        // The streaming fallback entry() takes when the length is unknowable.
+        fn via_streaming(input: &[u8], plan: DeferredPlan) -> Vec<u8> {
+            let mut out = Vec::new();
+            apply_deferred(&SliceMode::Bytes, input, &mut out, plan).expect("");
+            out
+        }
+
+        #[test]
+        fn engines_agree_on_oracle_rows() {
+            let rows: &[(&[u8], &str, &[u8])] = &[
+                (b"abcdefghij", "-5:", b"fghij"),
+                (b"abcdefghij", ":-3", b"abcdefg"),
+                (b"abcdefghij", "-8:-2:3", b"cf"),
+                (b"abcdefghij", "2:-2:2", b"ceg"),
+                (b"abcdefghij", "-10:", b"abcdefghij"),
+                (b"abc", ":-100", b""),
+                (b"abcdefghij", "-100:", b"abcdefghij"),
+                (b"abcdefghij", "-5:8", b"fgh"),
+                (b"abcdefghij", "-2:100", b"ij"),
+                (b"abcdefghij", "5:-8", b""),
+                (b"", "-3:", b""),
+                (b"sl\xaace\x00bin", "-4:", b"\x00bin"),
+            ];
+            for &(input, range, expected) in rows {
+                let plan = deferred(range);
+                assert_eq!(
+                    via_resolved(input, plan),
+                    expected,
+                    "resolved engine for {range}"
+                );
+                assert_eq!(
+                    via_streaming(input, plan),
+                    expected,
+                    "streaming engine for {range}"
+                );
+            }
+        }
+
+        static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+        #[test]
+        fn regular_len_requires_a_nonempty_regular_file() {
+            for contents in [&b"abc"[..], b""] {
+                let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+                let path = std::env::temp_dir().join(format!(
+                    "slice-regular-len-{}-{}.txt",
+                    std::process::id(),
+                    id
+                ));
+                fs::write(&path, contents).expect("write temp file");
+                let file = fs::File::open(&path).expect("open temp file");
+                let len = regular_len(&file);
+                fs::remove_file(&path).ok();
+                // An empty file must stream: 0 is also what FIFOs report.
+                let expected = (!contents.is_empty()).then_some(contents.len() as u64);
+                assert_eq!(len, expected, "contents {contents:?}");
+            }
         }
     }
 
