@@ -1,0 +1,6 @@
+start: 7 from the end
+end:   2 from the end (exclusive)
+step:  3
+0-based: lines at indices [length-7, length-2), every 3 starting at length-7, clamped to the input length
+1-based: every 3rd line from the 7th line from the end up to the 3rd line from the end
+count: at most 2

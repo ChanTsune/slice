@@ -5,8 +5,8 @@ mod ext;
 mod range;
 
 use crate::{
-    ext::{slice_lag, slice_stepped, slice_window, Byte, Bytes},
-    range::{DeferredPlan, Plan, SlicePlan, SliceRange},
+    ext::{slice_lag, slice_stepped, slice_tail, slice_window, Byte, Bytes},
+    range::{DeferredPlan, Plan, SliceIndex, SlicePlan, SliceRange},
 };
 use clap::{CommandFactory, Parser};
 use std::{
@@ -331,6 +331,118 @@ fn byte_lag<R: BufRead, W: Write>(
     output.flush()
 }
 
+/// Append `data` to the circular buffer of the last `k` bytes: the byte at
+/// absolute index p lives at slot p % k (`filled` counts the bytes appended
+/// before this call). Only the last k bytes of `data` are written — at most
+/// two `copy_from_slice` once the ring is full.
+#[inline]
+fn ring_extend(ring: &mut Vec<u8>, k: usize, mut filled: u64, mut data: &[u8]) {
+    // Grown lazily toward k so a huge `-k:` never preallocates past the bytes
+    // actually seen; while growing, slot p % k = p = ring.len().
+    if ring.len() < k {
+        let grow = data.len().min(k - ring.len());
+        ring.extend_from_slice(&data[..grow]);
+        filled += grow as u64;
+        data = &data[grow..];
+        if data.is_empty() {
+            return;
+        }
+    }
+    let keep = data.len().min(k);
+    let tail = &data[data.len() - keep..];
+    let pos = ((filled + (data.len() - keep) as u64) % k as u64) as usize;
+    let first = keep.min(k - pos);
+    ring[pos..pos + first].copy_from_slice(&tail[..first]);
+    ring[..keep - first].copy_from_slice(&tail[first..]);
+}
+
+/// `tail -c N` equivalent generalized with end/step: the last `back` bytes
+/// seen ride a circular buffer; EOF fixes the length and the resolve
+/// arithmetic picks the emitted span, always within the ring's window. An
+/// absolute `end` freezes the ring once reached — the remainder is counted
+/// without copying.
+fn byte_tail<R: BufRead, W: Write>(
+    mut input: R,
+    mut output: W,
+    back: NonZeroUsize,
+    end: Option<SliceIndex>,
+    step: NonZeroUsize,
+) -> io::Result<()> {
+    let k = back.get();
+    let bound = match end {
+        Some(SliceIndex::FromStart(end)) => Some(end as u64),
+        _ => None,
+    };
+    let mut ring: Vec<u8> = Vec::new();
+    // Bytes appended to the ring (capped at `bound`) / consumed from input.
+    let mut filled: u64 = 0;
+    let mut total: u64 = 0;
+    loop {
+        let used = {
+            let block = match input.fill_buf() {
+                Ok([]) => break,
+                Ok(block) => block,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) => return Err(err),
+            };
+            let take = match bound {
+                Some(end) => block.len().min((end - filled) as usize),
+                None => block.len(),
+            };
+            ring_extend(&mut ring, k, filled, &block[..take]);
+            filled += take as u64;
+            block.len()
+        };
+        input.consume(used);
+        total += used as u64;
+    }
+    let start = SliceIndex::FromEnd(back).resolve(total);
+    let end = end.map_or(total, |end| end.resolve(total));
+    if step.get() == 1 {
+        // The selected span is contiguous in the ring, split at most once at
+        // the wrap boundary.
+        if start < end {
+            let pos = (start % k as u64) as usize;
+            let count = (end - start) as usize;
+            let first = count.min(k - pos);
+            output.write_all(&ring[pos..pos + first])?;
+            output.write_all(&ring[..count - first])?;
+        }
+    } else {
+        let step = step.get() as u64;
+        let mut buf = Vec::with_capacity(WRITE_BUF_SIZE);
+        let mut p = start;
+        while p < end {
+            buf.push(ring[(p % k as u64) as usize]);
+            if buf.len() == WRITE_BUF_SIZE {
+                output.write_all(&buf)?;
+                buf.clear();
+            }
+            p = p.saturating_add(step);
+        }
+        if !buf.is_empty() {
+            output.write_all(&buf)?;
+        }
+    }
+    output.flush()
+}
+
+#[inline]
+fn delimit_tail<R: BufRead, W: Write>(
+    input: R,
+    output: W,
+    delimiter: &[u8],
+    back: NonZeroUsize,
+    end: Option<SliceIndex>,
+    step: NonZeroUsize,
+) -> io::Result<()> {
+    debug_assert!(!delimiter.is_empty(), "empty delimiter is byte mode");
+    match delimiter {
+        &[b] => slice_tail(Byte(b), input, output, back, end, step),
+        multi => slice_tail(Bytes::new(multi), input, output, back, end, step),
+    }
+}
+
 #[inline]
 fn delimit_lag<R: BufRead, W: Write>(
     input: R,
@@ -355,6 +467,11 @@ fn apply_deferred<R: BufRead, W: Write>(
     plan: DeferredPlan,
 ) -> io::Result<()> {
     match plan {
+        DeferredPlan::Tail { back, end, step } => match mode {
+            SliceMode::Lines => slice_tail(Byte(b'\n'), input, output, back, end, step),
+            SliceMode::Bytes => byte_tail(input, output, back, end, step),
+            SliceMode::Custom(delimiter) => delimit_tail(input, output, delimiter, back, end, step),
+        },
         DeferredPlan::Lag { start, back, step } => match mode {
             SliceMode::Lines => slice_lag(Byte(b'\n'), input, output, start, back, step),
             SliceMode::Bytes => byte_lag(input, output, start, back, step),
@@ -491,17 +608,20 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::range::SliceIndex;
     use std::str::FromStr;
 
-    // The driver helpers below take absolute offsets; tail-relative ends have
-    // their own deferred drivers and never reach them.
+    // The driver helpers below take absolute offsets; tail-relative bounds
+    // have their own deferred drivers and never reach them.
     fn bounds(range: &SliceRange) -> (usize, Option<usize>) {
+        let start = match range.start {
+            SliceIndex::FromStart(start) => start,
+            SliceIndex::FromEnd(_) => panic!("helper drives head-relative ranges"),
+        };
         let end = range.end.map(|end| match end {
             SliceIndex::FromStart(end) => end,
             SliceIndex::FromEnd(_) => panic!("helper drives head-relative ranges"),
         });
-        (range.start, end)
+        (start, end)
     }
 
     fn resolved_plan_of(range: &SliceRange) -> SlicePlan {
@@ -843,6 +963,32 @@ mod tests {
                 NonZeroUsize::MIN,
             )
             .expect_err("a broken pipe must propagate from byte_lag");
+            assert!(is_broken_pipe(&err));
+        }
+
+        // Tail emission happens at EOF, after the input was read in full; the
+        // failure must still surface from the write loop.
+        #[test]
+        fn tail_emission_propagates_broken_pipe() {
+            let err = slice_tail(
+                Byte(b'\n'),
+                &b"a\nb\nc\n"[..],
+                BrokenPipeWriter,
+                NonZeroUsize::MIN,
+                None,
+                NonZeroUsize::MIN,
+            )
+            .expect_err("a broken pipe must propagate from slice_tail");
+            assert!(is_broken_pipe(&err));
+
+            let err = byte_tail(
+                &b"abcdefghij"[..],
+                BrokenPipeWriter,
+                NonZeroUsize::MIN,
+                None,
+                NonZeroUsize::MIN,
+            )
+            .expect_err("a broken pipe must propagate from byte_tail");
             assert!(is_broken_pipe(&err));
         }
     }
@@ -1211,6 +1357,146 @@ mod tests {
         }
     }
 
+    mod byte_tail {
+        use super::*;
+        use crate::ext::IteratorExt;
+
+        fn tailed_at(
+            input: &[u8],
+            k: usize,
+            end: Option<SliceIndex>,
+            step: usize,
+            capacity: usize,
+        ) -> Vec<u8> {
+            let reader = io::BufReader::with_capacity(capacity, input);
+            let mut out = Vec::new();
+            byte_tail(
+                reader,
+                &mut out,
+                NonZeroUsize::new(k).unwrap(),
+                end,
+                NonZeroUsize::new(step).unwrap(),
+            )
+            .expect("");
+            out
+        }
+
+        fn tailed(input: &[u8], k: usize, end: Option<SliceIndex>, step: usize) -> Vec<u8> {
+            tailed_at(input, k, end, step, 8 * 1024)
+        }
+
+        fn at(end: usize) -> Option<SliceIndex> {
+            Some(SliceIndex::FromStart(end))
+        }
+
+        fn from_end(m: usize) -> Option<SliceIndex> {
+            Some(SliceIndex::FromEnd(NonZeroUsize::new(m).unwrap()))
+        }
+
+        #[test]
+        fn keeps_tail_bytes() {
+            assert_eq!(tailed(b"abcdefghij", 5, None, 1), b"fghij");
+        }
+
+        #[test]
+        fn tail_relative_end_with_stride() {
+            // -8:-2:3 == s[2:8:3]
+            assert_eq!(tailed(b"abcdefghij", 8, from_end(2), 3), b"cf");
+        }
+
+        #[test]
+        fn back_at_or_past_len_keeps_whole_input() {
+            assert_eq!(tailed(b"abcdefghij", 10, None, 1), b"abcdefghij");
+            assert_eq!(tailed(b"abcdefghij", 100, None, 1), b"abcdefghij");
+        }
+
+        #[test]
+        fn bounded_end_freezes_ring() {
+            // -5:8 == s[5:8]
+            assert_eq!(tailed(b"abcdefghij", 5, at(8), 1), b"fgh");
+            // -2:1 selects [max(0, L-2), 1): byte 0 for L <= 2, nothing after.
+            assert_eq!(tailed(b"a", 2, at(1), 1), b"a");
+            assert_eq!(tailed(b"abc", 2, at(1), 1), b"");
+            // end >= L never freezes.
+            assert_eq!(tailed(b"abcdefghij", 2, at(100), 1), b"ij");
+        }
+
+        #[test]
+        fn empty_input() {
+            assert_eq!(tailed(b"", 3, None, 1), b"");
+            assert_eq!(tailed(b"", 3, at(1), 1), b"");
+        }
+
+        #[test]
+        fn binary_is_preserved_byte_exact() {
+            let input = b"sl\xaace\xaabinary\x00stream";
+            assert_eq!(tailed(input, 8, None, 1), b"y\x00stream");
+        }
+
+        #[test]
+        fn stride_crosses_write_buffer_boundary() {
+            // k = 40000 at step 2 selects 20000 bytes, forcing the 8 KiB batch
+            // buffer to flush mid-run.
+            let input: Vec<u8> = (0..64 * 1024u32).map(|i| (i % 251) as u8).collect();
+            let expected: Vec<u8> = input
+                .iter()
+                .copied()
+                .slice(input.len() - 40000, None, NonZeroUsize::new(2))
+                .collect();
+            assert_eq!(tailed(&input, 40000, None, 2), expected);
+        }
+
+        #[test]
+        fn parity_with_iterator_oracle() {
+            // Patterned non-UTF-8 input; the prime length avoids lining up
+            // with any of the reader capacities below.
+            let input: Vec<u8> = (0..1031u32)
+                .map(|i| match i % 7 {
+                    0 => 0x00,
+                    3 => 0xaa,
+                    _ => (i % 251) as u8,
+                })
+                .collect();
+            for k in [1usize, 2, 3, 7, 250, 1031, 100_000] {
+                for end in [
+                    None,
+                    at(1),
+                    at(500),
+                    at(2000),
+                    from_end(1),
+                    from_end(100),
+                    from_end(2000),
+                ] {
+                    for step in [1usize, 2, 3, 7] {
+                        let resolved_end = match end {
+                            None => input.len(),
+                            Some(SliceIndex::FromStart(end)) => end.min(input.len()),
+                            Some(SliceIndex::FromEnd(m)) => input.len().saturating_sub(m.get()),
+                        };
+                        let expected: Vec<u8> = input
+                            .iter()
+                            .copied()
+                            .slice(
+                                input.len().saturating_sub(k),
+                                Some(resolved_end),
+                                NonZeroUsize::new(step),
+                            )
+                            .collect();
+                        // Capacity 1 keeps every block below k (ring growth
+                        // and wrap), 8192 covers single blocks larger than k.
+                        for capacity in [1, 3, 8192] {
+                            assert_eq!(
+                                tailed_at(&input, k, end, step, capacity),
+                                expected,
+                                "k={k} end={end:?} step={step} capacity={capacity}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     mod copy {
         use super::*;
 
@@ -1264,6 +1550,12 @@ mod tests {
         #[test]
         fn custom_delimiter() {
             assert_eq!(applied(SliceMode::Custom(b",".as_slice()), "::"), INPUT);
+        }
+
+        #[test]
+        fn minus_zero_start_is_copy() {
+            assert_eq!(resolved_plan("-0:"), SlicePlan::Copy);
+            assert_eq!(applied(SliceMode::Lines, "-0:"), INPUT);
         }
 
         #[test]
@@ -1326,7 +1618,9 @@ mod tests {
         #[test]
         fn routes_through_byte_machinery() {
             const INPUT: &[u8] = b"slice\xaabinary\nstream";
-            for range in ["::", "1:", ":3", "2:5", "::2", "1::3", "5:3", ":-2"] {
+            for range in [
+                "::", "1:", ":3", "2:5", "::2", "1::3", "5:3", ":-2", "-3:", "-4:-1:2",
+            ] {
                 let plan = SliceRange::from_str(range).unwrap().plan();
                 let apply_with = |mode: &SliceMode| {
                     let mut out = Vec::new();
@@ -1410,6 +1704,26 @@ mod tests {
         fn stepped_empty_range_emits_nothing_without_reading() {
             assert_eq!(applied(SliceMode::Lines, "5:3:2"), b"");
             assert_eq!(applied(SliceMode::Bytes, "5:3:2"), b"");
+        }
+
+        #[test]
+        fn static_negative_pairs_emit_nothing_without_reading() {
+            assert_eq!(applied(SliceMode::Lines, "-2:-5"), b"");
+            assert_eq!(applied(SliceMode::Lines, "-3:-3"), b"");
+            assert_eq!(applied(SliceMode::Bytes, "-5:0"), b"");
+        }
+
+        // Control: a genuinely tail-relative start has no static answer and
+        // must read the input.
+        #[test]
+        fn tail_relative_start_reads_input() {
+            let plan = match SliceRange::from_str("-1:").unwrap().plan() {
+                Plan::Deferred(deferred) => deferred,
+                Plan::Resolved(plan) => panic!("-1: must defer, got {plan:?}"),
+            };
+            let mut out = Vec::new();
+            apply_deferred(&SliceMode::Lines, NoReadReader, &mut out, plan)
+                .expect_err("a tail-relative start must read the input");
         }
     }
 

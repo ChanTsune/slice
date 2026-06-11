@@ -30,7 +30,11 @@ impl FromStr for NonZeroByteSize {
     group(ArgGroup::new("mode").args(["lines", "bytes", "delimiter", "null"])),
 )]
 pub(crate) struct Args {
+    // Required so tail-relative ranges (`-5:`) survive flag parsing; the
+    // trade-off is that an unknown flag in range position is reported as an
+    // invalid <RANGE> value (still exit 2).
     #[arg(
+        allow_hyphen_values = true,
         help = "The slice syntax is similar to Python's slice syntax, with the format `start:end:step`.
 Each value is optional and, if omitted, defaults to the start of the file, the end of the file, and a step of 1, respectively.
 e.g., '50:100', '50:100:1'
@@ -151,7 +155,7 @@ mod tests {
         assert_eq!(
             args.range,
             SliceRange {
-                start: 0,
+                start: SliceIndex::FromStart(0),
                 end: None,
                 step: NonZeroUsize::new(1),
             }
@@ -166,7 +170,7 @@ mod tests {
         assert_eq!(
             args.range,
             SliceRange {
-                start: 0,
+                start: SliceIndex::FromStart(0),
                 end: None,
                 step: NonZeroUsize::new(1),
             }
@@ -187,13 +191,38 @@ mod tests {
     }
 
     #[test]
+    fn negative_range_survives_flag_parsing() {
+        let tail = SliceRange {
+            start: SliceIndex::FromEnd(NonZeroUsize::new(5).unwrap()),
+            end: None,
+            step: None,
+        };
+        let args = Args::parse_from(["slice", "-5:"]);
+        assert_eq!(args.range, tail);
+
+        let args = Args::parse_from(["slice", "-l", "-5:", "text.txt"]);
+        assert!(args.lines);
+        assert_eq!(args.range, tail);
+        assert_eq!(args.files, vec![PathBuf::from("text.txt")]);
+
+        let args = Args::parse_from(["slice", "-5:", "-l", "text.txt"]);
+        assert!(args.lines);
+        assert_eq!(args.range, tail);
+        assert_eq!(args.files, vec![PathBuf::from("text.txt")]);
+
+        let args = Args::parse_from(["slice", "--explain", "-5:"]);
+        assert!(args.explain);
+        assert_eq!(args.range, tail);
+    }
+
+    #[test]
     fn explain_flag_parses() {
         let args = Args::parse_from(["slice", "--explain", "10:20"]);
         assert!(args.explain);
         assert_eq!(
             args.range,
             SliceRange {
-                start: 10,
+                start: SliceIndex::FromStart(10),
                 end: Some(SliceIndex::FromStart(20)),
                 step: None,
             }
