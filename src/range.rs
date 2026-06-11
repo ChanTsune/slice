@@ -70,25 +70,24 @@ pub(crate) enum SlicePlan {
     },
 }
 
+/// Classify absolute (head-relative) bounds into an execution plan.
+#[inline]
+fn classify(start: usize, end: Option<usize>, step: Option<NonZeroUsize>) -> SlicePlan {
+    // Checked before step: no step can select anything from `start >= end`.
+    if end.is_some_and(|end| start >= end) {
+        return SlicePlan::Empty;
+    }
+    match step {
+        Some(step) if step.get() > 1 => SlicePlan::Stepped { start, end, step },
+        _ if start == 0 && end.is_none() => SlicePlan::Copy,
+        _ => SlicePlan::Window { start, end },
+    }
+}
+
 impl SliceRange {
     #[inline]
     pub(crate) fn plan(&self) -> SlicePlan {
-        // Checked before step: no step can select anything from `start >= end`.
-        if self.end.is_some_and(|end| self.start >= end) {
-            return SlicePlan::Empty;
-        }
-        match self.step {
-            Some(step) if step.get() > 1 => SlicePlan::Stepped {
-                start: self.start,
-                end: self.end,
-                step,
-            },
-            _ if self.start == 0 && self.end.is_none() => SlicePlan::Copy,
-            _ => SlicePlan::Window {
-                start: self.start,
-                end: self.end,
-            },
-        }
+        classify(self.start, self.end, self.step)
     }
 
     /// Render a human-readable description of what this resolved range selects,
