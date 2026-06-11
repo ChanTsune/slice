@@ -136,6 +136,31 @@ fn classify(start: usize, end: Option<usize>, step: Option<NonZeroUsize>) -> Sli
     }
 }
 
+impl DeferredPlan {
+    /// Absolutize against a known length and classify through the same rules
+    /// as head-relative ranges. An end at or past `len` normalizes to
+    /// unbounded, which re-enables the Copy / unbounded io::copy fast paths.
+    /// `None` only when the offsets do not fit usize (32-bit, >4GiB): callers
+    /// stream instead.
+    pub(crate) fn resolve(&self, len: u64) -> Option<SlicePlan> {
+        let (start, end, step) = match *self {
+            DeferredPlan::Tail { back, end, step } => (SliceIndex::FromEnd(back), end, step),
+            DeferredPlan::Lag { start, back, step } => (
+                SliceIndex::FromStart(start),
+                Some(SliceIndex::FromEnd(back)),
+                step,
+            ),
+        };
+        let start = start.resolve(len);
+        let end = end.map(|end| end.resolve(len)).filter(|&end| end < len);
+        Some(classify(
+            usize::try_from(start).ok()?,
+            end.map(usize::try_from).transpose().ok()?,
+            Some(step),
+        ))
+    }
+}
+
 impl SliceRange {
     #[inline]
     pub(crate) fn plan(&self) -> Plan {
@@ -841,6 +866,103 @@ mod tests {
                 "{empty} selects nothing for every length and must not read input"
             );
         }
+    }
+
+    fn deferred(range: &str) -> DeferredPlan {
+        match SliceRange::from_str(range).unwrap().plan() {
+            Plan::Deferred(deferred) => deferred,
+            Plan::Resolved(plan) => panic!("{range} must defer, resolved to {plan:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_matches_python_indices() {
+        fn bound(v: i64) -> SliceIndex {
+            match NonZeroUsize::new(v.unsigned_abs() as usize) {
+                Some(back) if v < 0 => SliceIndex::FromEnd(back),
+                _ => SliceIndex::FromStart(v as usize),
+            }
+        }
+        // Python slice(start, end, step).indices(len) for a positive step.
+        fn python_indices(
+            start: Option<i64>,
+            end: Option<i64>,
+            step: usize,
+            len: usize,
+        ) -> Vec<usize> {
+            let len = len as i64;
+            let clamp = |v: i64| if v < 0 { (len + v).max(0) } else { v.min(len) };
+            (start.map_or(0, clamp)..end.map_or(len, clamp))
+                .step_by(step)
+                .map(|i| i as usize)
+                .collect()
+        }
+        fn selected(plan: SlicePlan, len: usize) -> Vec<usize> {
+            match plan {
+                SlicePlan::Empty => Vec::new(),
+                SlicePlan::Copy => (0..len).collect(),
+                SlicePlan::Window { start, end } => {
+                    (start..end.map_or(len, |end| end.min(len))).collect()
+                }
+                SlicePlan::Stepped { start, end, step } => (start
+                    ..end.map_or(len, |end| end.min(len)))
+                    .step_by(step.get())
+                    .collect(),
+            }
+        }
+
+        let bounds: Vec<Option<i64>> = std::iter::once(None).chain((-20..=20).map(Some)).collect();
+        for len in 0..=40usize {
+            for &start in &bounds {
+                for &end in &bounds {
+                    for step in [1usize, 2, 3, 7] {
+                        let range = SliceRange {
+                            start: start.map_or(SliceIndex::FromStart(0), bound),
+                            end: end.map(bound),
+                            step: NonZeroUsize::new(step),
+                        };
+                        let plan = match range.plan() {
+                            Plan::Resolved(plan) => plan,
+                            Plan::Deferred(deferred) => deferred
+                                .resolve(len as u64)
+                                .expect("offsets fit usize on this platform"),
+                        };
+                        assert_eq!(
+                            selected(plan, len),
+                            python_indices(start, end, step, len),
+                            "len={len} start={start:?} end={end:?} step={step}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_demotes_full_tail_to_copy() {
+        assert_eq!(deferred("-100:").resolve(10), Some(SlicePlan::Copy));
+        assert_eq!(deferred("-10:").resolve(10), Some(SlicePlan::Copy));
+    }
+
+    #[test]
+    fn resolve_end_at_len_unbounds() {
+        for range in ["-5:10", "-5:100"] {
+            assert_eq!(
+                deferred(range).resolve(10),
+                Some(SlicePlan::Window {
+                    start: 5,
+                    end: None
+                }),
+                "{range} must rejoin the unbounded window path at length 10"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_crossing_is_empty() {
+        assert_eq!(deferred("2:-5").resolve(7), Some(SlicePlan::Empty));
+        assert_eq!(deferred("2:-5").resolve(6), Some(SlicePlan::Empty));
+        assert_eq!(deferred("-5:3").resolve(10), Some(SlicePlan::Empty));
     }
 
     #[test]
