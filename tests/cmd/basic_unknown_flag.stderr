@@ -1,7 +1,3 @@
-error: unexpected argument '--bogus' found
-
-  tip: to pass '--bogus' as a value, use '-- --bogus'
-
-Usage: slice[EXE] [OPTIONS] <RANGE> [FILES]...
+error: invalid value '--bogus' for '<RANGE>': invalid start value '--bogus': invalid digit found in string
 
 For more information, try '--help'.

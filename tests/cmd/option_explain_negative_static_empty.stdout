@@ -1,0 +1,6 @@
+start: 2 from the end
+end:   5 from the end (exclusive)
+step:  1
+0-based: lines at indices [length-2, length-5)
+1-based: empty (start length-2 is at or past end length-5)
+count: 0

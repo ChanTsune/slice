@@ -1,4 +1,4 @@
-use crate::ext::IteratorExt;
+use crate::{ext::IteratorExt, range::SliceIndex};
 use memchr::memmem;
 use std::{
     collections::VecDeque,
@@ -315,6 +315,59 @@ pub(crate) fn slice_stepped<S: Split, R: BufRead, W: Write>(
             break;
         }
         index += 1;
+    }
+    output.flush()
+}
+
+/// Tail-relative start (`-k:…`): the last k chunks cannot be identified until
+/// EOF, so chunks ride a ring of recycled buffers; EOF fixes the length and
+/// the resolve arithmetic picks the survivors. Chunk i lives at slot i % cap
+/// for the last min(cap, read) chunks appended, which always covers the
+/// resolved selection (with an absolute `end` the ring freezes at chunk `end`
+/// and the selection stays below it).
+pub(crate) fn slice_tail<S: Split, R: BufRead, W: Write>(
+    split: S,
+    mut input: R,
+    mut output: W,
+    back: NonZeroUsize,
+    end: Option<SliceIndex>,
+    step: NonZeroUsize,
+) -> io::Result<()> {
+    let cap = back.get();
+    let bound = match end {
+        Some(SliceIndex::FromStart(end)) => Some(end),
+        _ => None,
+    };
+    // Grown lazily toward cap so a huge `-k:` never preallocates past the
+    // chunks actually seen.
+    let mut ring: Vec<Vec<u8>> = Vec::new();
+    let mut scratch = Vec::new();
+    let mut total = 0usize;
+    loop {
+        // Past an absolute end no chunk can be selected: freeze the ring and
+        // bulk-count the remainder.
+        if bound.is_some_and(|end| total >= end) {
+            total += split.skip_n(&mut input, usize::MAX)?;
+            break;
+        }
+        scratch.clear();
+        // EOF is decided before placement so a recycled slot keeps its chunk.
+        if split.read_to(&mut input, &mut scratch)? == 0 {
+            break;
+        }
+        let slot = total % cap;
+        if ring.len() <= slot {
+            ring.push(std::mem::take(&mut scratch));
+        } else {
+            std::mem::swap(&mut ring[slot], &mut scratch);
+        }
+        total += 1;
+    }
+    let len = total as u64;
+    let start = SliceIndex::FromEnd(back).resolve(len) as usize;
+    let end = end.map_or(total, |end| end.resolve(len) as usize);
+    for i in (0..total).slice(start, Some(end), Some(step)) {
+        output.write_all(&ring[i % cap])?;
     }
     output.flush()
 }
@@ -1070,6 +1123,183 @@ mod tests {
             assert_lag_parity(BytesRef(b"||"), b"a||b||c||d||");
             assert_lag_parity(BytesRef(b"||"), b"a|||b|");
             assert_lag_parity(BytesRef(b"aaa"), b"aaaaaa");
+        }
+    }
+
+    mod tail {
+        use super::*;
+
+        fn tailed<S: Split>(
+            split: S,
+            input: &[u8],
+            k: usize,
+            end: Option<SliceIndex>,
+            step: usize,
+            capacity: usize,
+        ) -> Vec<u8> {
+            let mut out = Vec::new();
+            slice_tail(
+                split,
+                BufReader::with_capacity(capacity, input),
+                &mut out,
+                NonZeroUsize::new(k).unwrap(),
+                end,
+                NonZeroUsize::new(step).unwrap(),
+            )
+            .unwrap();
+            out
+        }
+
+        fn at(end: usize) -> Option<SliceIndex> {
+            Some(SliceIndex::FromStart(end))
+        }
+
+        fn from_end(m: usize) -> Option<SliceIndex> {
+            Some(SliceIndex::FromEnd(NonZeroUsize::new(m).unwrap()))
+        }
+
+        const INPUT: &[u8] = b"a\nb\nc\nd\ne\n";
+
+        #[test]
+        fn keeps_tail_chunks() {
+            assert_eq!(tailed(Byte(b'\n'), INPUT, 2, None, 1, 8 * 1024), b"d\ne\n");
+        }
+
+        #[test]
+        fn unterminated_final_chunk_counts() {
+            assert_eq!(
+                tailed(Byte(b'\n'), b"a\nb\nc\nd\ne", 2, None, 1, 8 * 1024),
+                b"d\ne"
+            );
+            assert_eq!(
+                tailed(Byte(b'\n'), b"a\nb\nc\nd\ne", 1, None, 1, 8 * 1024),
+                b"e"
+            );
+        }
+
+        #[test]
+        fn stride() {
+            assert_eq!(tailed(Byte(b'\n'), INPUT, 4, None, 2, 8 * 1024), b"b\nd\n");
+        }
+
+        #[test]
+        fn start_past_front_clamps_to_whole_input() {
+            assert_eq!(tailed(Byte(b'\n'), INPUT, 5, None, 1, 8 * 1024), INPUT);
+            assert_eq!(tailed(Byte(b'\n'), INPUT, 100, None, 1, 8 * 1024), INPUT);
+        }
+
+        #[test]
+        fn bounded_end_freezes_ring() {
+            // -3:4 on 5 chunks: [2, 4).
+            assert_eq!(tailed(Byte(b'\n'), INPUT, 3, at(4), 1, 8 * 1024), b"c\nd\n");
+            // The freeze fires exactly at chunk `end`; the bulk-counted
+            // remainder still grows L past the bound.
+            assert_eq!(tailed(Byte(b'\n'), INPUT, 4, at(2), 1, 8 * 1024), b"b\n");
+            // end >= L never freezes.
+            assert_eq!(
+                tailed(Byte(b'\n'), INPUT, 2, at(100), 1, 8 * 1024),
+                b"d\ne\n"
+            );
+        }
+
+        #[test]
+        fn bounded_end_with_short_input() {
+            // -2:1 selects [max(0, L-2), 1): chunk 0 for L <= 2, nothing after.
+            assert_eq!(tailed(Byte(b'\n'), b"a\n", 2, at(1), 1, 8 * 1024), b"a\n");
+            assert_eq!(
+                tailed(Byte(b'\n'), b"a\nb\n", 2, at(1), 1, 8 * 1024),
+                b"a\n"
+            );
+            assert_eq!(
+                tailed(Byte(b'\n'), b"a\nb\nc\n", 2, at(1), 1, 8 * 1024),
+                b""
+            );
+        }
+
+        #[test]
+        fn tail_relative_end() {
+            // -4:-1 on 5 chunks: [1, 4).
+            assert_eq!(
+                tailed(Byte(b'\n'), INPUT, 4, from_end(1), 1, 8 * 1024),
+                b"b\nc\nd\n"
+            );
+            assert_eq!(
+                tailed(Byte(b'\n'), INPUT, 4, from_end(1), 2, 8 * 1024),
+                b"b\nd\n"
+            );
+        }
+
+        #[test]
+        fn ring_recycles_over_long_input() {
+            let input = b"x\n".repeat(1000);
+            assert_eq!(
+                tailed(Byte(b'\n'), &input, 3, None, 1, 8 * 1024),
+                b"x\nx\nx\n"
+            );
+        }
+
+        #[test]
+        fn empty_input() {
+            assert_eq!(tailed(Byte(b'\n'), b"", 3, None, 1, 8 * 1024), b"");
+            assert_eq!(tailed(Byte(b'\n'), b"", 3, at(1), 1, 8 * 1024), b"");
+        }
+
+        #[test]
+        fn binary_chunks_round_trip() {
+            let input = b"sl\xaace\nbin\xff\nslice\xaa";
+            assert_eq!(
+                tailed(Byte(b'\n'), input, 2, None, 1, 8 * 1024),
+                b"bin\xff\nslice\xaa"
+            );
+        }
+
+        fn assert_tail_parity<S: Split + Copy>(split: S, input: &[u8]) {
+            let total = chunks(split, input).len();
+            for k in [1usize, 2, 3, 7, 100] {
+                for end in [
+                    None,
+                    at(1),
+                    at(2),
+                    at(4),
+                    at(100),
+                    from_end(1),
+                    from_end(2),
+                    from_end(6),
+                ] {
+                    for &step in STEPS {
+                        let step = NonZeroUsize::new(step).unwrap();
+                        let resolved_end = match end {
+                            None => total,
+                            Some(SliceIndex::FromStart(end)) => end.min(total),
+                            Some(SliceIndex::FromEnd(m)) => total.saturating_sub(m.get()),
+                        };
+                        let expected = reference(
+                            split,
+                            input,
+                            total.saturating_sub(k),
+                            Some(resolved_end),
+                            Some(step),
+                        );
+                        for capacity in [1, 2, 3, 8 * 1024] {
+                            assert_eq!(
+                                tailed(split, input, k, end, step.get(), capacity),
+                                expected,
+                                "slice_tail diverged for -{k}:{end:?}:{step} capacity {capacity} on {input:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn tail_parity_with_slice_oracle() {
+            assert_tail_parity(ByteRef(b'\n'), b"a\nb\nc\nd\ne\n");
+            assert_tail_parity(ByteRef(b'\n'), b"a\nb\nc\nd\ne");
+            assert_tail_parity(ByteRef(0), b"a\0b\0c\0");
+            assert_tail_parity(BytesRef(b"||"), b"a||b||c||d||");
+            assert_tail_parity(BytesRef(b"||"), b"a|||b|");
+            assert_tail_parity(BytesRef(b"aaa"), b"aaaaaa");
         }
     }
 }

@@ -12,9 +12,20 @@ pub(crate) enum SliceIndex {
     FromEnd(NonZeroUsize),
 }
 
+impl SliceIndex {
+    /// Resolve to an absolute offset clamped to [0, len] (Python slice.indices).
+    #[inline]
+    pub(crate) fn resolve(self, len: u64) -> u64 {
+        match self {
+            SliceIndex::FromStart(i) => (i as u64).min(len),
+            SliceIndex::FromEnd(k) => len.saturating_sub(k.get() as u64),
+        }
+    }
+}
+
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub(crate) struct SliceRange {
-    pub(crate) start: usize,
+    pub(crate) start: SliceIndex,
     /// `None` means unbounded (run to the end of input).
     pub(crate) end: Option<SliceIndex>,
     pub(crate) step: Option<NonZeroUsize>,
@@ -89,8 +100,20 @@ pub(crate) enum Plan {
     Deferred(DeferredPlan),
 }
 
+/// Tail (no output before EOF) and Lag (streams with a fixed delay) are
+/// distinct execution mechanisms, so they are separate variants rather than
+/// one shape matched at runtime.
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub(crate) enum DeferredPlan {
+    /// `-k:…` — tail-relative start. `plan()` establishes the invariants:
+    /// `end == Some(FromEnd(m))` only with `m < back`, `end ==
+    /// Some(FromStart(e))` only with `e >= 1` (other pairs are statically
+    /// empty).
+    Tail {
+        back: NonZeroUsize,
+        end: Option<SliceIndex>,
+        step: NonZeroUsize,
+    },
     /// `start:-m…` — head-relative start, tail-relative end.
     Lag {
         start: usize,
@@ -116,16 +139,21 @@ fn classify(start: usize, end: Option<usize>, step: Option<NonZeroUsize>) -> Sli
 impl SliceRange {
     #[inline]
     pub(crate) fn plan(&self) -> Plan {
-        match self.end {
-            None => Plan::Resolved(classify(self.start, None, self.step)),
-            Some(SliceIndex::FromStart(end)) => {
-                Plan::Resolved(classify(self.start, Some(end), self.step))
+        use SliceIndex::*;
+        let step = self.step.unwrap_or(NonZeroUsize::MIN);
+        match (self.start, self.end) {
+            (FromStart(start), None) => Plan::Resolved(classify(start, None, self.step)),
+            (FromStart(start), Some(FromStart(end))) => {
+                Plan::Resolved(classify(start, Some(end), self.step))
             }
-            Some(SliceIndex::FromEnd(back)) => Plan::Deferred(DeferredPlan::Lag {
-                start: self.start,
-                back,
-                step: self.step.unwrap_or(NonZeroUsize::MIN),
-            }),
+            // [L-k, L-m) is empty for every length when k <= m.
+            (FromEnd(k), Some(FromEnd(m))) if k <= m => Plan::Resolved(SlicePlan::Empty),
+            // `-k:0` selects nothing for every length, like `:0`.
+            (FromEnd(_), Some(FromStart(0))) => Plan::Resolved(SlicePlan::Empty),
+            (FromEnd(back), end) => Plan::Deferred(DeferredPlan::Tail { back, end, step }),
+            (FromStart(start), Some(FromEnd(back))) => {
+                Plan::Deferred(DeferredPlan::Lag { start, back, step })
+            }
         }
     }
 
@@ -133,10 +161,15 @@ impl SliceRange {
     /// without reading any input. `unit` names the elements (e.g. "line").
     pub(crate) fn explain(&self, unit: &str) -> String {
         let step = self.step.map_or(1, NonZeroUsize::get);
-        match self.end {
-            None => explain_resolved(self.start, None, step, unit),
-            Some(SliceIndex::FromStart(end)) => explain_resolved(self.start, Some(end), step, unit),
-            Some(SliceIndex::FromEnd(back)) => explain_lag(self.start, back, step, unit),
+        match (self.start, self.end) {
+            (SliceIndex::FromStart(start), None) => explain_resolved(start, None, step, unit),
+            (SliceIndex::FromStart(start), Some(SliceIndex::FromStart(end))) => {
+                explain_resolved(start, Some(end), step, unit)
+            }
+            (SliceIndex::FromStart(start), Some(SliceIndex::FromEnd(back))) => {
+                explain_lag(start, back, step, unit)
+            }
+            (SliceIndex::FromEnd(back), end) => explain_tail(back, end, step, unit),
         }
     }
 }
@@ -249,6 +282,87 @@ fn explain_lag(start: usize, back: NonZeroUsize, step: usize, unit: &str) -> Str
     out
 }
 
+/// Tail-relative start: the resolved offset is `length - back`, unknowable
+/// without reading the input, so positions are described symbolically.
+fn explain_tail(back: NonZeroUsize, end: Option<SliceIndex>, step: usize, unit: &str) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("start: {back} from the end\n"));
+    match end {
+        None => out.push_str("end:   end of input\n"),
+        Some(SliceIndex::FromStart(end)) => out.push_str(&format!("end:   {end} (exclusive)\n")),
+        Some(SliceIndex::FromEnd(m)) => {
+            out.push_str(&format!("end:   {m} from the end (exclusive)\n"))
+        }
+    }
+    out.push_str(&format!("step:  {step}\n"));
+
+    // The statically empty pairs ([L-k, L-m) with k <= m, and end 0) mirror
+    // the resolved empty form: no clamping note, count 0.
+    let static_empty_end = match end {
+        Some(SliceIndex::FromEnd(m)) if back <= m => Some(format!("length-{m}")),
+        Some(SliceIndex::FromStart(0)) => Some("0".to_owned()),
+        _ => None,
+    };
+    if let Some(end) = static_empty_end {
+        out.push_str(&format!(
+            "0-based: {unit}s at indices [length-{back}, {end})\n"
+        ));
+        out.push_str(&format!(
+            "1-based: empty (start length-{back} is at or past end {end})\n"
+        ));
+        out.push_str("count: 0\n");
+        return out;
+    }
+
+    match end {
+        None => out.push_str(&format!(
+            "0-based: {unit}s at indices [length-{back}, end of input)"
+        )),
+        Some(SliceIndex::FromStart(end)) => out.push_str(&format!(
+            "0-based: {unit}s at indices [length-{back}, {end})"
+        )),
+        Some(SliceIndex::FromEnd(m)) => out.push_str(&format!(
+            "0-based: {unit}s at indices [length-{back}, length-{m})"
+        )),
+    }
+    if step != 1 {
+        out.push_str(&format!(", every {step} starting at length-{back}"));
+    }
+    out.push_str(", clamped to the input length\n");
+
+    let first = format!("the {} {unit} from the end", ordinal(back.get()));
+    let last = match end {
+        None => format!("the last {unit}"),
+        // end is exclusive 0-based, so the last selected 1-based position is `end`.
+        Some(SliceIndex::FromStart(end)) => format!("the {} {unit}", ordinal(end)),
+        // The last index the bound admits is length-m-1, i.e. the (m+1)-th
+        // position counting back from the end.
+        Some(SliceIndex::FromEnd(m)) => format!(
+            "the {} {unit} from the end",
+            ordinal(m.get().saturating_add(1))
+        ),
+    };
+    if step == 1 {
+        out.push_str(&format!("1-based: from {first} to {last}\n"));
+    } else {
+        out.push_str(&format!(
+            "1-based: every {step}{} {unit} from {first} up to {last}\n",
+            ordinal_suffix(step)
+        ));
+    }
+
+    match end {
+        // The window spans at most `back` (resp. `back - m`) positions.
+        None => out.push_str(&format!("count: at most {}\n", back.get().div_ceil(step))),
+        Some(SliceIndex::FromEnd(m)) => out.push_str(&format!(
+            "count: at most {}\n",
+            (back.get() - m.get()).div_ceil(step)
+        )),
+        Some(SliceIndex::FromStart(_)) => out.push_str("count: depends on the input length\n"),
+    }
+    out
+}
+
 /// "1st", "2nd", "3rd", "4th" ...
 fn ordinal(n: usize) -> String {
     format!("{n}{}", ordinal_suffix(n))
@@ -292,6 +406,14 @@ fn parse_index(s: &str, field: RangeField) -> Result<Option<SliceIndex>, ParseSl
     }
 }
 
+/// Relative end for a tail-relative start: `end = (k from the end) - n`.
+/// Reaching or passing the end of input unbounds it (`min(L, ·) = L` is
+/// exactly what `end = None` selects).
+#[inline]
+fn end_minus(k: NonZeroUsize, n: usize) -> Option<SliceIndex> {
+    NonZeroUsize::new(k.get().saturating_sub(n)).map(SliceIndex::FromEnd)
+}
+
 impl FromStr for SliceRange {
     type Err = ParseSliceRangeError;
 
@@ -315,20 +437,31 @@ impl FromStr for SliceRange {
         };
 
         let mut ptn = s.split(':');
-        let start = parse(ptn.next().unwrap_or(""), RangeField::Start)?.unwrap_or(0usize);
+        let start = parse_index(ptn.next().unwrap_or(""), RangeField::Start)?
+            .unwrap_or(SliceIndex::FromStart(0));
         let maybe_end = ptn.next().ok_or(ParseSliceRangeError::MissingColon)?;
         let (start, end) = if let Some(amount) = maybe_end.strip_prefix("+-") {
             let lines = relative_amount(amount)?;
-            (
-                start.saturating_sub(lines),
-                Some(SliceIndex::FromStart(start.saturating_add(lines))),
-            )
+            match start {
+                SliceIndex::FromStart(start) => (
+                    SliceIndex::FromStart(start.saturating_sub(lines)),
+                    Some(SliceIndex::FromStart(start.saturating_add(lines))),
+                ),
+                // The window [start-n, start+n) in tail coordinates: the back
+                // distance grows by n, the end distance shrinks by n.
+                SliceIndex::FromEnd(k) => (
+                    SliceIndex::FromEnd(k.saturating_add(lines)),
+                    end_minus(k, lines),
+                ),
+            }
         } else if let Some(amount) = maybe_end.strip_prefix('+') {
             let lines = relative_amount(amount)?;
-            (
-                start,
-                Some(SliceIndex::FromStart(start.saturating_add(lines))),
-            )
+            match start {
+                SliceIndex::FromStart(s) => {
+                    (start, Some(SliceIndex::FromStart(s.saturating_add(lines))))
+                }
+                SliceIndex::FromEnd(k) => (start, end_minus(k, lines)),
+            }
         } else {
             (start, parse_index(maybe_end, RangeField::End)?)
         };
@@ -353,7 +486,7 @@ mod tests {
         assert_eq!(
             slice,
             SliceRange {
-                start: 0,
+                start: SliceIndex::FromStart(0),
                 end: Some(SliceIndex::FromStart(1)),
                 step: NonZeroUsize::new(1),
             }
@@ -366,7 +499,7 @@ mod tests {
         assert_eq!(
             slice,
             SliceRange {
-                start: 0,
+                start: SliceIndex::FromStart(0),
                 end: Some(SliceIndex::FromStart(1)),
                 step: None,
             }
@@ -375,7 +508,7 @@ mod tests {
         assert_eq!(
             slice,
             SliceRange {
-                start: 0,
+                start: SliceIndex::FromStart(0),
                 end: Some(SliceIndex::FromStart(1)),
                 step: NonZeroUsize::new(1),
             }
@@ -388,7 +521,7 @@ mod tests {
         assert_eq!(
             slice,
             SliceRange {
-                start: 0,
+                start: SliceIndex::FromStart(0),
                 end: Some(SliceIndex::FromStart(1)),
                 step: NonZeroUsize::new(1),
             }
@@ -401,7 +534,7 @@ mod tests {
         assert_eq!(
             slice,
             SliceRange {
-                start: 0,
+                start: SliceIndex::FromStart(0),
                 end: None,
                 step: NonZeroUsize::new(1),
             }
@@ -414,7 +547,7 @@ mod tests {
         assert_eq!(
             slice,
             SliceRange {
-                start: 0,
+                start: SliceIndex::FromStart(0),
                 end: None,
                 step: NonZeroUsize::new(1),
             }
@@ -427,7 +560,7 @@ mod tests {
         assert_eq!(
             slice,
             SliceRange {
-                start: 0,
+                start: SliceIndex::FromStart(0),
                 end: None,
                 step: None,
             }
@@ -436,7 +569,7 @@ mod tests {
         assert_eq!(
             slice,
             SliceRange {
-                start: 0,
+                start: SliceIndex::FromStart(0),
                 end: None,
                 step: NonZeroUsize::new(1),
             }
@@ -451,7 +584,7 @@ mod tests {
 
     #[test]
     fn plan_copies_whole_input_ranges() {
-        for whole in [":", "::", "0:", "0::", "::1", "0::1"] {
+        for whole in [":", "::", "0:", "0::", "::1", "0::1", "-0:"] {
             assert_eq!(
                 SliceRange::from_str(whole).unwrap().plan(),
                 Plan::Resolved(SlicePlan::Copy),
@@ -521,7 +654,7 @@ mod tests {
         assert_eq!(
             slice,
             SliceRange {
-                start: 1,
+                start: SliceIndex::FromStart(1),
                 end: Some(SliceIndex::FromStart(2)),
                 step: None,
             }
@@ -534,7 +667,7 @@ mod tests {
         assert_eq!(
             slice,
             SliceRange {
-                start: 90,
+                start: SliceIndex::FromStart(90),
                 end: Some(SliceIndex::FromStart(110)),
                 step: None,
             }
@@ -547,7 +680,7 @@ mod tests {
         assert_eq!(
             slice,
             SliceRange {
-                start: 0,
+                start: SliceIndex::FromStart(0),
                 end: Some(SliceIndex::FromStart(15)),
                 step: None,
             }
@@ -559,7 +692,7 @@ mod tests {
         assert_eq!(
             SliceRange::from_str(":-2").unwrap(),
             SliceRange {
-                start: 0,
+                start: SliceIndex::FromStart(0),
                 end: Some(SliceIndex::FromEnd(NonZeroUsize::new(2).unwrap())),
                 step: None,
             }
@@ -567,7 +700,7 @@ mod tests {
         assert_eq!(
             SliceRange::from_str("5:-3:2").unwrap(),
             SliceRange {
-                start: 5,
+                start: SliceIndex::FromStart(5),
                 end: Some(SliceIndex::FromEnd(NonZeroUsize::new(3).unwrap())),
                 step: NonZeroUsize::new(2),
             }
@@ -579,10 +712,76 @@ mod tests {
     }
 
     #[test]
+    fn negative_start() {
+        assert_eq!(
+            SliceRange::from_str("-5:").unwrap(),
+            SliceRange {
+                start: SliceIndex::FromEnd(NonZeroUsize::new(5).unwrap()),
+                end: None,
+                step: None,
+            }
+        );
+        assert_eq!(
+            SliceRange::from_str("-4::2").unwrap(),
+            SliceRange {
+                start: SliceIndex::FromEnd(NonZeroUsize::new(4).unwrap()),
+                end: None,
+                step: NonZeroUsize::new(2),
+            }
+        );
+        assert_eq!(
+            SliceRange::from_str("-7:8").unwrap(),
+            SliceRange {
+                start: SliceIndex::FromEnd(NonZeroUsize::new(7).unwrap()),
+                end: Some(SliceIndex::FromStart(8)),
+                step: None,
+            }
+        );
+    }
+
+    #[test]
+    fn negative_both() {
+        assert_eq!(
+            SliceRange::from_str("-7:-2").unwrap(),
+            SliceRange {
+                start: SliceIndex::FromEnd(NonZeroUsize::new(7).unwrap()),
+                end: Some(SliceIndex::FromEnd(NonZeroUsize::new(2).unwrap())),
+                step: None,
+            }
+        );
+        assert_eq!(
+            SliceRange::from_str("-4:-1:2").unwrap(),
+            SliceRange {
+                start: SliceIndex::FromEnd(NonZeroUsize::new(4).unwrap()),
+                end: Some(SliceIndex::FromEnd(NonZeroUsize::new(1).unwrap())),
+                step: NonZeroUsize::new(2),
+            }
+        );
+    }
+
+    #[test]
+    fn max_magnitude_both_signs() {
+        assert_eq!(
+            SliceRange::from_str("18446744073709551615:").unwrap().start,
+            SliceIndex::FromStart(usize::MAX)
+        );
+        assert_eq!(
+            SliceRange::from_str("-18446744073709551615:")
+                .unwrap()
+                .start,
+            SliceIndex::FromEnd(NonZeroUsize::new(usize::MAX).unwrap())
+        );
+    }
+
+    #[test]
     fn minus_zero_normalizes_to_head() {
         assert_eq!(
             SliceRange::from_str(":-0").unwrap().end,
             Some(SliceIndex::FromStart(0))
+        );
+        assert_eq!(
+            SliceRange::from_str("-0:").unwrap().start,
+            SliceIndex::FromStart(0)
         );
     }
 
@@ -600,6 +799,104 @@ mod tests {
                 "{range} needs the input length and must defer"
             );
         }
+    }
+
+    #[test]
+    fn plan_defers_tail_relative_start() {
+        for (range, back, end, step) in [
+            ("-4:", 4, None, 1),
+            ("-4::2", 4, None, 2),
+            ("-7:8", 7, Some(SliceIndex::FromStart(8)), 1),
+            (
+                "-7:-2",
+                7,
+                Some(SliceIndex::FromEnd(NonZeroUsize::new(2).unwrap())),
+                1,
+            ),
+            (
+                "-7:-2:3",
+                7,
+                Some(SliceIndex::FromEnd(NonZeroUsize::new(2).unwrap())),
+                3,
+            ),
+        ] {
+            assert_eq!(
+                SliceRange::from_str(range).unwrap().plan(),
+                Plan::Deferred(DeferredPlan::Tail {
+                    back: NonZeroUsize::new(back).unwrap(),
+                    end,
+                    step: NonZeroUsize::new(step).unwrap(),
+                }),
+                "{range} needs the input length and must defer"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_empties_negative_pairs_statically() {
+        for empty in ["-2:-5", "-3:-3", "-5:0", "-5:+0"] {
+            assert_eq!(
+                SliceRange::from_str(empty).unwrap().plan(),
+                Plan::Resolved(SlicePlan::Empty),
+                "{empty} selects nothing for every length and must not read input"
+            );
+        }
+    }
+
+    #[test]
+    fn from_end_plus() {
+        // -5:+3 == s[-5:-2]
+        assert_eq!(
+            SliceRange::from_str("-5:+3").unwrap(),
+            SliceRange {
+                start: SliceIndex::FromEnd(NonZeroUsize::new(5).unwrap()),
+                end: Some(SliceIndex::FromEnd(NonZeroUsize::new(2).unwrap())),
+                step: None,
+            }
+        );
+    }
+
+    #[test]
+    fn from_end_plus_exact_unbounds() {
+        // -5:+5 reaches the end of input exactly == s[-5:]
+        assert_eq!(SliceRange::from_str("-5:+5").unwrap().end, None);
+    }
+
+    #[test]
+    fn from_end_plus_overflow_unbounds() {
+        assert_eq!(SliceRange::from_str("-5:+7").unwrap().end, None);
+    }
+
+    #[test]
+    fn from_end_plus_minus() {
+        // -5:+-2 == s[-7:-3]
+        assert_eq!(
+            SliceRange::from_str("-5:+-2").unwrap(),
+            SliceRange {
+                start: SliceIndex::FromEnd(NonZeroUsize::new(7).unwrap()),
+                end: Some(SliceIndex::FromEnd(NonZeroUsize::new(3).unwrap())),
+                step: None,
+            }
+        );
+        // -2:+-5 saturates past the end == s[-7:]
+        assert_eq!(
+            SliceRange::from_str("-2:+-5").unwrap(),
+            SliceRange {
+                start: SliceIndex::FromEnd(NonZeroUsize::new(7).unwrap()),
+                end: None,
+                step: None,
+            }
+        );
+    }
+
+    #[test]
+    fn from_end_plus_zero_is_empty() {
+        let range = SliceRange::from_str("-5:+0").unwrap();
+        assert_eq!(
+            range.end,
+            Some(SliceIndex::FromEnd(NonZeroUsize::new(5).unwrap()))
+        );
+        assert_eq!(range.plan(), Plan::Resolved(SlicePlan::Empty));
     }
 
     mod explain {
@@ -660,7 +957,7 @@ mod tests {
         #[test]
         fn max_start_saturates_first_position() {
             let range = SliceRange {
-                start: usize::MAX,
+                start: SliceIndex::FromStart(usize::MAX),
                 end: None,
                 step: None,
             };
@@ -691,6 +988,60 @@ mod tests {
                 "1-based: every 2nd line from the 2nd line up to the 2nd line from the end"
             ));
             assert!(stepped.contains("count: depends on the input length"));
+        }
+
+        #[test]
+        fn negative_start_is_symbolic() {
+            let text = SliceRange::from_str("-5:").unwrap().explain("line");
+            assert!(text.contains("start: 5 from the end"));
+            assert!(text.contains("end:   end of input"));
+            assert!(text.contains(
+                "0-based: lines at indices [length-5, end of input), clamped to the input length"
+            ));
+            assert!(text.contains("1-based: from the 5th line from the end to the last line"));
+            assert!(text.contains("count: at most 5"));
+
+            let stepped = SliceRange::from_str("-7:-2:3").unwrap().explain("line");
+            assert!(stepped.contains("start: 7 from the end"));
+            assert!(stepped.contains("end:   2 from the end (exclusive)"));
+            assert!(stepped.contains(
+                "0-based: lines at indices [length-7, length-2), every 3 starting at length-7, clamped to the input length"
+            ));
+            assert!(stepped.contains(
+                "1-based: every 3rd line from the 7th line from the end up to the 3rd line from the end"
+            ));
+            // indices L-7, L-4 -> at most 2 elements
+            assert!(stepped.contains("count: at most 2"));
+
+            let unbounded_stepped = SliceRange::from_str("-4::2").unwrap().explain("line");
+            assert!(unbounded_stepped.contains(
+                "0-based: lines at indices [length-4, end of input), every 2 starting at length-4, clamped to the input length"
+            ));
+            // indices L-4, L-2 -> at most 2 elements
+            assert!(unbounded_stepped.contains("count: at most 2"));
+        }
+
+        #[test]
+        fn negative_start_bounded_end_depends_on_length() {
+            let text = SliceRange::from_str("-3:4").unwrap().explain("line");
+            assert!(text.contains("start: 3 from the end"));
+            assert!(text.contains("end:   4 (exclusive)"));
+            assert!(text
+                .contains("0-based: lines at indices [length-3, 4), clamped to the input length"));
+            assert!(text.contains("1-based: from the 3rd line from the end to the 4th line"));
+            assert!(text.contains("count: depends on the input length"));
+        }
+
+        #[test]
+        fn negative_pair_empty_reports_zero() {
+            let text = SliceRange::from_str("-2:-5").unwrap().explain("line");
+            assert!(text.contains("0-based: lines at indices [length-2, length-5)"));
+            assert!(text.contains("1-based: empty (start length-2 is at or past end length-5)"));
+            assert!(text.contains("count: 0"));
+
+            let text = SliceRange::from_str("-5:0").unwrap().explain("line");
+            assert!(text.contains("1-based: empty (start length-5 is at or past end 0)"));
+            assert!(text.contains("count: 0"));
         }
     }
 
@@ -799,6 +1150,16 @@ mod tests {
                 }
             ));
             assert!(err.to_string().starts_with("invalid end value '-':"));
+
+            let err = SliceRange::from_str("-:").unwrap_err();
+            assert!(matches!(
+                err,
+                ParseSliceRangeError::InvalidField {
+                    field: RangeField::Start,
+                    ..
+                }
+            ));
+            assert!(err.to_string().starts_with("invalid start value '-':"));
         }
 
         #[test]
@@ -807,6 +1168,13 @@ mod tests {
                 SliceRange::from_str(":--1").unwrap_err(),
                 ParseSliceRangeError::InvalidField {
                     field: RangeField::End,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                SliceRange::from_str("--1:").unwrap_err(),
+                ParseSliceRangeError::InvalidField {
+                    field: RangeField::Start,
                     ..
                 }
             ));
@@ -821,14 +1189,28 @@ mod tests {
                     ..
                 }
             ));
+            assert!(matches!(
+                SliceRange::from_str("-+1:").unwrap_err(),
+                ParseSliceRangeError::InvalidField {
+                    field: RangeField::Start,
+                    ..
+                }
+            ));
         }
 
         #[test]
-        fn negative_end_overflow_rejected() {
+        fn negative_overflow_rejected() {
             assert!(matches!(
                 SliceRange::from_str(":-18446744073709551616").unwrap_err(),
                 ParseSliceRangeError::InvalidField {
                     field: RangeField::End,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                SliceRange::from_str("-18446744073709551616:").unwrap_err(),
+                ParseSliceRangeError::InvalidField {
+                    field: RangeField::Start,
                     ..
                 }
             ));

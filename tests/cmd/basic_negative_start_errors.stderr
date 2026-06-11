@@ -1,7 +1,0 @@
-error: unexpected argument '-1' found
-
-  tip: to pass '-1' as a value, use '-- -1'
-
-Usage: slice[EXE] [OPTIONS] <RANGE> [FILES]...
-
-For more information, try '--help'.
