@@ -1,0 +1,31 @@
+name: changelog
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+jobs:
+  check_changelog_updated:
+    runs-on: ubuntu-latest
+    # PR author, not github.actor: on labeled/unlabeled events the actor is
+    # whoever touched the label, which would defeat the dependabot skip.
+    if: github.event.pull_request.user.login != 'dependabot[bot]' && !contains(github.event.pull_request.labels.*.name, 'skip-changelog')
+    permissions:
+      pull-requests: read # read-only so the check also works on fork PRs
+    steps:
+      - name: Check CHANGELOG.md is updated
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        # The paginated files API handles large PRs; `gh pr diff` fetches the
+        # raw diff instead, which GitHub rejects past ~20k lines.
+        run: |
+          set -euo pipefail
+          files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename')
+          if grep -qxF 'CHANGELOG.md' <<< "$files"; then
+            echo "CHANGELOG.md is updated."
+          else
+            echo "::error::This PR does not update CHANGELOG.md. Add an entry under [Unreleased], or apply the 'skip-changelog' label."
+            exit 1
+          fi
