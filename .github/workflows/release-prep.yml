@@ -34,19 +34,10 @@ jobs:
         with:
           tool: cargo-release
 
-      - name: Build temp release config
-        id: prep
-        run: |
-          set -euo pipefail
-          CONFIG=/tmp/release-config.toml
-          printf 'pre-release-commit-message = "%s"\n' ':bookmark: Bump version to {{version}}' > "$CONFIG"
-          echo "config=$CONFIG" >> "$GITHUB_OUTPUT"
-
       - name: Run cargo release (no tag/push/publish)
         env:
           CARGO_TERM_COLOR: always
           INPUT_LEVEL: ${{ inputs.level }}
-          RELEASE_CONFIG: ${{ steps.prep.outputs.config }}
         run: |
           set -euo pipefail
           git config --global user.name "github-actions[bot]"
@@ -57,8 +48,7 @@ jobs:
             --no-push \
             --no-tag \
             --execute \
-            --no-confirm \
-            --config "$RELEASE_CONFIG"
+            --no-confirm
 
       - name: Get new version
         id: version
@@ -76,5 +66,5 @@ jobs:
           body: |
             Release prep (${{ inputs.level }}).
             - Version set to ${{ steps.version.outputs.value }}
-            - No tags, pushes, or publishes; cargo-release performed the version bump only.
+            - No tags, pushes, or publishes; cargo-release bumped the version and rolled CHANGELOG.md's [Unreleased] section into this release.
           draft: true
