@@ -1024,6 +1024,32 @@ mod tests {
     mod explain {
         use super::*;
 
+        // explain_tail re-derives plan()'s length-independent empty pairs to
+        // pick the mirror-of-empty form; sweep every tail-relative shape so
+        // the two derivations cannot drift apart silently.
+        #[test]
+        fn static_empty_rendering_agrees_with_plan() {
+            let nz = |n| NonZeroUsize::new(n).unwrap();
+            let mut ends = vec![None];
+            ends.extend((0..=4).map(|end| Some(SliceIndex::FromStart(end))));
+            ends.extend((1..=4).map(|m| Some(SliceIndex::FromEnd(nz(m)))));
+            for k in 1..=4 {
+                for &end in &ends {
+                    let range = SliceRange {
+                        start: SliceIndex::FromEnd(nz(k)),
+                        end,
+                        step: None,
+                    };
+                    let statically_empty = matches!(range.plan(), Plan::Resolved(SlicePlan::Empty));
+                    assert_eq!(
+                        range.explain("line").contains("count: 0"),
+                        statically_empty,
+                        "k={k} end={end:?}"
+                    );
+                }
+            }
+        }
+
         #[test]
         fn bounded_range_shows_count_and_positions() {
             let text = SliceRange::from_str("10:20").unwrap().explain("line");

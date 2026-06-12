@@ -1468,6 +1468,47 @@ mod tests {
                 }
             }
         }
+
+        // Serves its data, then fails instead of reporting EOF: anything the
+        // consumer wrote before the error must have been emitted mid-stream.
+        struct ErrAtEof<'a>(&'a [u8]);
+
+        impl Read for ErrAtEof<'_> {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                unreachable!("driven through BufRead")
+            }
+        }
+
+        impl BufRead for ErrAtEof<'_> {
+            fn fill_buf(&mut self) -> io::Result<&[u8]> {
+                if self.0.is_empty() {
+                    Err(io::Error::other("input failed mid-stream"))
+                } else {
+                    Ok(self.0)
+                }
+            }
+            fn consume(&mut self, amt: usize) {
+                self.0 = &self.0[amt..];
+            }
+        }
+
+        // Pins the streaming contract: a byte is written as soon as its m-th
+        // successor arrives, not at EOF. A buffer-until-EOF rewrite would
+        // leave `out` empty when the error surfaces.
+        #[test]
+        fn streams_confirmed_bytes_before_eof() {
+            let mut out = Vec::new();
+            let err = byte_lag(
+                ErrAtEof(b"abcde"),
+                &mut out,
+                0,
+                NonZeroUsize::new(2).unwrap(),
+                NonZeroUsize::MIN,
+            )
+            .expect_err("the mid-stream failure must surface");
+            assert_eq!(err.kind(), io::ErrorKind::Other);
+            assert_eq!(out, b"abc");
+        }
     }
 
     mod byte_tail {
