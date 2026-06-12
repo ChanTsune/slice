@@ -268,8 +268,9 @@ fn emit_run<W: Write>(
 /// GNU `head -c -N` equivalent generalized with start/step: bytes ride a ring
 /// of the last `back` bytes seen and one is confirmed (emitted, stride
 /// permitting) once `back` more bytes arrive, so at EOF the ring holds exactly
-/// the dropped tail. Reaches only non-seekable inputs, so the leading `start`
-/// bytes are read-discarded.
+/// the dropped tail. Runs when the resolve/seek fast path is unavailable
+/// (stdin, FIFOs, sizeless files) and assumes plain `BufRead`, so the leading
+/// `start` bytes are read-discarded.
 fn byte_lag<R: BufRead, W: Write>(
     mut input: R,
     mut output: W,
@@ -339,8 +340,9 @@ fn byte_lag<R: BufRead, W: Write>(
 
 /// Append `data` to the circular buffer of the last `k` bytes: the byte at
 /// absolute index p lives at slot p % k (`filled` counts the bytes appended
-/// before this call). Only the last k bytes of `data` are written — at most
-/// two `copy_from_slice` once the ring is full.
+/// before this call). The middle of an oversized block is never copied — only
+/// up to `k - ring.len()` leading bytes (growth) and the last k bytes are
+/// written, in at most two `copy_from_slice` once the ring is full.
 #[inline]
 fn ring_extend(ring: &mut Vec<u8>, k: usize, mut filled: u64, mut data: &[u8]) {
     // Grown lazily toward k so a huge `-k:` never preallocates past the bytes
@@ -553,7 +555,8 @@ fn multi<W: Write, R: BufRead, IW: Fn(fs::File) -> R, F: Fn(R, &mut W) -> io::Re
 
 /// Byte counts are trustworthy only for regular files: FIFOs and procfs-style
 /// files report 0 (or lie), and a 0-length regular file streams to the same
-/// empty output anyway.
+/// empty output anyway. A regular file whose st_size lies (sysfs attributes)
+/// is taken at its word — the same trust tail(1) places in st_size.
 fn regular_len(file: &fs::File) -> Option<u64> {
     let metadata = file.metadata().ok()?;
     (metadata.is_file() && metadata.len() > 0).then_some(metadata.len())
@@ -1724,7 +1727,7 @@ mod tests {
 
         // slice_mode is the production routing entry() uses; the empty
         // delimiter must land in byte mode and produce byte-identical output
-        // across every plan shape (Copy, Window, Stepped, Empty, Lag).
+        // across every plan shape (Copy, Window, Stepped, Empty, Tail, Lag).
         #[test]
         fn routes_through_byte_machinery() {
             const INPUT: &[u8] = b"slice\xaabinary\nstream";
