@@ -94,14 +94,56 @@ slice -5: file.txt
 ```
 
 This command prints the last five lines of `file.txt`, like `tail -n 5`. The
-usual `head`/`tail` invocations map onto tail-relative slices:
+usual `head`/`tail`/`sed`/`awk`/`dd` line and byte ranges all map onto one slice
+syntax:
 
-| Command              | Equivalent            |
-| -------------------- | --------------------- |
-| `slice -5: file`     | `tail -n 5 file`      |
-| `slice -b -5: file`  | `tail -c 5 file`      |
-| `slice :-5 file`     | `head -n -5 file` (GNU) |
-| `slice -b :-5 file`  | `head -c -5 file` (GNU) |
+<!-- CHEATSHEET:START -->
+The recipes below are generated from `docs/cheatsheet.toml`; the full
+version (byte ranges, every-Nth-line, NUL records, caveats, and a
+"when NOT to use slice" section) lives at
+<https://chantsune.github.io/slice/>.
+
+#### Print a range of lines (head, tail, sed, awk)
+
+| Task | coreutils / sed / awk / dd | slice |
+| --- | --- | --- |
+| First 5 lines | `head -n 5` | `slice :5` |
+| Last 5 lines | `tail -n 5` | `slice -5:` |
+| All but the last 5 lines | `head -n -5` | `slice :-5` |
+| All but the last line | `sed '$d'  /  head -n -1` | `slice :-1` |
+| All but the first line | `sed '1d'  /  tail -n +2` | `slice 1:` |
+| From line N to the end | `tail -n +3` | `slice 2:` |
+| Lines 2 through 5 | `sed -n '2,5p'  /  awk 'NR>=2&&NR<=5'` | `slice 1:5` |
+| Line 7 only | `sed -n '7p'  /  awk 'NR==7'` | `slice 6:7` |
+| From line 10 to the end | `sed -n '10,$p'` | `slice 9:` |
+
+#### Byte ranges from a file (head -c, tail -c, dd without dd)
+
+| Task | coreutils / sed / awk / dd | slice |
+| --- | --- | --- |
+| First 5 bytes | `head -c 5` | `slice -b :5` |
+| Last 5 bytes | `tail -c 5` | `slice -b -5:` |
+| All but the last 5 bytes | `head -c -5` | `slice -b :-5` |
+| From byte 6 to the end | `tail -c +6` | `slice -b 5:` |
+| Bytes 5 through 14 | `dd bs=1 skip=5 count=10` | `slice -b 5:15` |
+| First 4 bytes | `dd bs=1 count=4` | `slice -b 0:4` |
+| From byte 10 to the end | `dd bs=1 skip=10` | `slice -b 10:` |
+| A block range (bs=4 skip=1 count=2) | `dd bs=4 skip=1 count=2` | `slice -b 4:12` |
+
+#### Every Nth line (sed/awk only — slice does it too)
+
+| Task | coreutils / sed / awk / dd | slice |
+| --- | --- | --- |
+| Odd lines (1, 3, 5, ...) | `sed -n '1~2p'  /  awk 'NR%2==1'` | `slice ::2` |
+| Even lines (2, 4, 6, ...) | `sed -n '2~2p'  /  awk 'NR%2==0'` | `slice 1::2` |
+
+#### NUL-delimited records and other special cases
+
+| Task | coreutils / sed / awk / dd | slice |
+| --- | --- | --- |
+| Last NUL-delimited record (find -print0 style) | `—` | `slice -z -1:` |
+
+<!-- CHEATSHEET:END -->
 
 The bounds follow Python rather than coreutils where the two disagree: `-0`
 equals `0`, so `slice -0:` selects the whole input (where `tail -n 0` selects
