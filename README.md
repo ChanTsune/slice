@@ -14,6 +14,24 @@ Slice is a command-line tool written in Rust that allows you to slice the conten
 
 ## Installation
 
+### Via install script
+
+Linux and macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ChanTsune/slice/main/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/ChanTsune/slice/main/install.ps1 | iex
+```
+
+The script downloads the matching prebuilt binary from the latest GitHub release
+and installs it. Set `SLICE_VERSION` to pin a version or `SLICE_INSTALL_DIR` to
+choose the install location.
+
 ### Via Homebrew
 
 ```sh

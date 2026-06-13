@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A cheatsheet at <https://chantsune.github.io/slice/> mapping common `head`,
   `tail`, `sed`, `awk`, and `dd` recipes to their single-syntax `slice`
   equivalents.
+- One-line install scripts that download the matching prebuilt binary from the
+  latest release: `install.sh` for Linux/macOS (`curl … | sh`) and `install.ps1`
+  for Windows (`irm … | iex`).
 
 ## [0.5.0] - 2026-06-13
 
