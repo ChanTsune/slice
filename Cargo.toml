@@ -26,3 +26,19 @@ path = "src/main.rs"
 
 [dev-dependencies]
 trycmd = "1.1"
+
+# cargo-binstall resolves assets by crate name by default; the release assets
+# are named after the binary ("slice"), so spell the URL and layout out.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/{ version }/slice-{ version }-{ target }{ archive-suffix }"
+bin-dir = "slice-{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
+[package.metadata.binstall.overrides.i686-pc-windows-msvc]
+pkg-fmt = "zip"
+
+[package.metadata.binstall.overrides.aarch64-pc-windows-msvc]
+pkg-fmt = "zip"
