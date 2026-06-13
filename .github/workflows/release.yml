@@ -4,17 +4,37 @@ on:
     tags:
       - "[0-9]+.[0-9]+.[0-9]+"
 
-permissions: write-all
+permissions:
+  contents: write
 
 jobs:
   create-release:
     name: create-release
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     outputs:
       slice_version: ${{ steps.release.outputs.version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-rust
+      # Generate (and stage) the assets before publishing the release, so a
+      # build/generation failure leaves no asset-less release behind.
+      - name: Generate completions and man page
+        run: |
+          cargo build --release
+          mkdir -p complete doc
+          ./target/release/slice --generate complete-bash > complete/slice.bash
+          ./target/release/slice --generate complete-zsh > complete/_slice
+          ./target/release/slice --generate complete-fish > complete/slice.fish
+          ./target/release/slice --generate complete-powershell > complete/_slice.ps1
+          ./target/release/slice --generate man > doc/slice.1
+      - name: Upload completions and man page
+        uses: actions/upload-artifact@v7
+        with:
+          name: assets
+          path: |
+            complete/
+            doc/
       - name: Create GitHub release
         id: release
         uses: taiki-e/create-gh-release-action@v1
@@ -27,8 +47,8 @@ jobs:
     needs: ['create-release']
     runs-on: ${{ matrix.os }}
     env:
-      # For some builds, we use cross to test on 32-bit and big-endian
-      # systems.
+      # For some builds, we use cross to compile for targets the host
+      # runner can't build natively; they opt in via `cross` in the matrix.
       CARGO: cargo
       # When CARGO is set to CROSS, this is set to `--target matrix.target`.
       TARGET_FLAGS: ""
@@ -40,43 +60,63 @@ jobs:
       PCRE2_SYS_STATIC: 1
     strategy:
       matrix:
-        build: 
+        build:
           - linux
           - linux-arm
+          - linux-arm64
           - macos
           - macos-arm
           - win-msvc
           # - win-gnu
           - win32-msvc
+          - win-arm64-msvc
         include:
         - build: linux
-          os: ubuntu-22.04
+          os: ubuntu-latest
           rust: stable
           target: x86_64-unknown-linux-musl
+          cross: true
         - build: linux-arm
-          os: ubuntu-22.04
+          os: ubuntu-latest
           rust: stable
           target: arm-unknown-linux-gnueabihf
+          cross: true
+        - build: linux-arm64
+          os: ubuntu-24.04-arm
+          rust: stable
+          target: aarch64-unknown-linux-musl
+          cross: false
+        # macos-15 runners are arm64; x86_64-apple-darwin is a cross-compile
+        # through the target added by setup-rust.
         - build: macos
-          os: macos-12
+          os: macos-15
           rust: stable
           target: x86_64-apple-darwin
+          cross: false
         - build: macos-arm
-          os: macos-12
+          os: macos-15
           rust: stable
           target: aarch64-apple-darwin
+          cross: false
         - build: win-msvc
-          os: windows-2022
+          os: windows-latest
           rust: stable
           target: x86_64-pc-windows-msvc
+          cross: false
         # - build: win-gnu
-        #   os: windows-2022
+        #   os: windows-latest
         #   rust: stable-x86_64-gnu
         #   target: x86_64-pc-windows-gnu
         - build: win32-msvc
-          os: windows-2022
+          os: windows-latest
           rust: stable
           target: i686-pc-windows-msvc
+          cross: false
+        - build: win-arm64-msvc
+          os: windows-11-arm
+          rust: stable
+          target: aarch64-pc-windows-msvc
+          cross: false
 
     steps:
     - name: Checkout repository
@@ -89,10 +129,14 @@ jobs:
 
     - name: Setup cross
       shell: bash
-      if: ${{ !startsWith(matrix.os, 'macos') }}
+      if: ${{ matrix.cross }}
       run: |
         cargo install cross
         echo "CARGO=cross" >> $GITHUB_ENV
+    - name: Setup musl tools
+      shell: bash
+      if: ${{ matrix.target == 'aarch64-unknown-linux-musl' }}
+      run: sudo apt-get update && sudo apt-get install -y musl-tools
     - name: Setup target flags
       shell: bash
       run: |
@@ -108,20 +152,28 @@ jobs:
     - name: Build release binary
       run: ${{ env.CARGO }} build --verbose --release ${{ env.TARGET_FLAGS }}
 
+    - name: Download completions and man page
+      uses: actions/download-artifact@v8
+      with:
+        name: assets
+
     - name: Build archive
       shell: bash
       run: |
-        staging="slice-${{ needs.create-release.outputs.slice_version }}-${{ matrix.target }}"
+        target="${{ matrix.target }}"
+        staging="slice-${{ needs.create-release.outputs.slice_version }}-$target"
         mkdir -p "$staging"/{complete,doc}
 
         cp {README.md,LICENSE-APACHE,LICENSE-MIT} "$staging/"
+        cp complete/* "$staging/complete/"
+        cp doc/* "$staging/doc/"
 
-        if [ "${{ matrix.os }}" = "windows-2022" ]; then
-          cp "target/${{ matrix.target }}/release/slice.exe" "$staging/"
+        if [[ "$target" == *-windows-* ]]; then
+          cp "target/$target/release/slice.exe" "$staging/"
           7z a "$staging.zip" "$staging"
           echo "ASSET=$staging.zip" >> $GITHUB_ENV
         else
-          cp "target/${{ matrix.target }}/release/slice" "$staging/"
+          cp "target/$target/release/slice" "$staging/"
           tar czf "$staging.tar.gz" "$staging"
           echo "ASSET=$staging.tar.gz" >> $GITHUB_ENV
         fi
