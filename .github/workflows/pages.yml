@@ -29,10 +29,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-rust
-      # docs/index.html is gitignored, so it must be regenerated from the SSOT
-      # (docs/cheatsheet.toml) before the artifact is uploaded.
-      - name: Generate docs/index.html
-        run: cargo xtask gen
+      - name: Install docs image renderer
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends librsvg2-bin
+      # docs/index.html and the raster images (og.png, apple-touch-icon.png)
+      # are gitignored, so they must be regenerated from the SSOT/SVG sources
+      # before the artifact is uploaded.
+      - name: Generate docs
+        run: |
+          cargo xtask gen
+          rsvg-convert -w 1200 -h 630 -f png -o docs/og.png docs/og.svg
+          rsvg-convert -w 180 -h 180 -f png -o docs/apple-touch-icon.png docs/favicon.svg
       - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v5
         with:

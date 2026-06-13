@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="slice logo: a colon between square brackets">
+  <title>slice</title>
+  <rect width="64" height="64" rx="14" fill="#14171a"/>
+  <g fill="none" stroke="#6ea8ff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M26 15 H15 V49 H26"/>
+    <path d="M38 15 H49 V49 H38"/>
+  </g>
+  <circle cx="32" cy="26" r="4.5" fill="#e6e8ea"/>
+  <circle cx="32" cy="38" r="4.5" fill="#e6e8ea"/>
+</svg>
