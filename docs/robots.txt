@@ -1,0 +1,30 @@
+# slice cheatsheet — crawling policy.
+#
+# Note: on a GitHub Pages project site this file is served under the project
+# subpath (https://chantsune.github.io/slice/robots.txt). Crawlers only honor
+# robots.txt at the host root (chantsune.github.io/robots.txt), which this
+# repository does not control, so these directives are effectively inert today.
+# They are kept for a future custom domain or apex deployment. The page-level
+# control that actually applies is <meta name="robots" content="index, follow">
+# in index.html.
+
+User-agent: *
+Allow: /
+
+# AI / answer-engine crawlers explicitly welcomed (GEO).
+User-agent: GPTBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+Sitemap: https://chantsune.github.io/slice/sitemap.xml
