@@ -35,6 +35,18 @@ jobs:
         run: cargo test --locked --release
         env:
           RUST_BACKTRACE: 1
+      # Verify the committed README table matches the SSOT, that generated docs/*
+      # are idempotent, and that each row's slice command matches its
+      # coreutils/sed/awk/dd recipe.
+      # Skipped on Windows: no coreutils, and the release binary is slice.exe,
+      # which the default --slice path (target/release/slice) does not resolve.
+      - name: run cheatsheet parity check
+        if: ${{ !startsWith(matrix.os, 'windows') }}
+        run: |
+          cargo build --locked --release
+          cargo xtask check --slice ./target/release/slice
+        env:
+          RUST_BACKTRACE: 1
   msrv:
     runs-on: ubuntu-latest
     steps:
