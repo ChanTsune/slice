@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="slice cheatsheet: head, tail, sed, awk, dd line and byte ranges in one Python-slice syntax">
+  <!-- Hand-drawn mirror of these docs/cheatsheet.toml rows (kept in sync by
+       cargo xtask check, which asserts each `slice ...` token below matches a
+       row's slice value): tail_last_5_lines, lines_2_to_5, odd_lines,
+       bytes_5_to_15. -->
+  <defs>
+    <style>
+      .sans { font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+      .mono { font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace; }
+    </style>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="630" fill="#14171a"/>
+  <rect x="0" y="0" width="1200" height="8" fill="#2563c9"/>
+
+  <!-- Wordmark and tagline -->
+  <text x="80" y="108" class="mono" font-size="58" font-weight="700" fill="#e6e8ea">slice</text>
+  <text x="80" y="158" class="sans" font-size="27" fill="#9aa1a9">Extract line and byte ranges from a file — a Python-slice cheatsheet</text>
+
+  <!-- Column headers -->
+  <text x="80"  y="232" class="sans" font-size="20" font-weight="650" fill="#9aa1a9" letter-spacing="1.5">TASK</text>
+  <text x="470" y="232" class="sans" font-size="20" font-weight="650" fill="#9aa1a9" letter-spacing="1.5">head · tail · sed · awk · dd</text>
+  <text x="900" y="232" class="sans" font-size="20" font-weight="650" fill="#6ea8ff" letter-spacing="1.5">slice</text>
+  <line x1="80" y1="250" x2="1120" y2="250" stroke="#2a2f35" stroke-width="2"/>
+
+  <!-- Row 1: Last 5 lines -->
+  <text x="80"  y="300" class="sans" font-size="24" fill="#e6e8ea">Last 5 lines</text>
+  <text x="470" y="300" class="mono" font-size="24" fill="#c7ccd2">tail -n 5</text>
+  <rect x="900" y="278" width="150" height="34" rx="6" fill="#16243d"/>
+  <text x="916" y="302" class="mono" font-size="24" font-weight="600" fill="#aacbff">slice -5:</text>
+
+  <!-- Row 2: Lines 2 through 5 -->
+  <text x="80"  y="356" class="sans" font-size="24" fill="#e6e8ea">Lines 2 through 5</text>
+  <text x="470" y="356" class="mono" font-size="24" fill="#c7ccd2">sed -n '2,5p'</text>
+  <rect x="900" y="334" width="165" height="34" rx="6" fill="#16243d"/>
+  <text x="916" y="358" class="mono" font-size="24" font-weight="600" fill="#aacbff">slice 1:5</text>
+
+  <!-- Row 3: Every other line (the upsell: head/tail can't do this) -->
+  <text x="80"  y="412" class="sans" font-size="24" fill="#e6e8ea">Odd lines (1, 3, 5, …)</text>
+  <text x="470" y="412" class="mono" font-size="24" fill="#c7ccd2">awk 'NR%2==1'</text>
+  <rect x="900" y="390" width="150" height="34" rx="6" fill="#16243d"/>
+  <text x="916" y="414" class="mono" font-size="24" font-weight="600" fill="#aacbff">slice ::2</text>
+
+  <!-- Row 4: Byte range -->
+  <text x="80"  y="468" class="sans" font-size="24" fill="#e6e8ea">Bytes 5 through 14</text>
+  <text x="470" y="468" class="mono" font-size="24" fill="#c7ccd2">dd bs=1 skip=5 count=10</text>
+  <rect x="900" y="446" width="200" height="34" rx="6" fill="#16243d"/>
+  <text x="916" y="470" class="mono" font-size="24" font-weight="600" fill="#aacbff">slice -b 5:15</text>
+
+  <line x1="80" y1="510" x2="1120" y2="510" stroke="#2a2f35" stroke-width="2"/>
+
+  <!-- Footer line -->
+  <text x="80" y="560" class="sans" font-size="22" fill="#9aa1a9">One <tspan class="mono" fill="#e6e8ea">start:end:step</tspan> syntax. 0-based, end-exclusive. Binary-safe.</text>
+  <text x="80" y="596" class="mono" font-size="20" fill="#6ea8ff">chantsune.github.io/slice</text>
+</svg>
