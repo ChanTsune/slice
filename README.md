@@ -28,6 +28,20 @@ nix-env --install -f https://github.com/chantsune/slice/tarball/main
 cargo install slice-command
 ```
 
+### Prebuilt binaries
+
+Prebuilt archives for Linux, macOS, and Windows (x86 and ARM) are published on
+the [GitHub Releases](https://github.com/ChanTsune/slice/releases) page; see that
+page for the targets covered by the latest release. Each archive bundles shell
+completions (`complete/`) and the man page (`doc/`) alongside the binary.
+
+[`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall) fetches and
+installs the matching archive automatically:
+
+```sh
+cargo binstall slice-command
+```
+
 ### From Source (via Cargo)
 
 ```sh
@@ -122,6 +136,33 @@ For more details, run:
 ```sh
 slice --help
 ```
+
+## Shell completions and man page
+
+`slice --generate <KIND>` prints a completion script or the man page to standard
+output. `<KIND>` is one of `complete-bash`, `complete-zsh`, `complete-fish`,
+`complete-powershell`, or `man`. Redirect the output to wherever your shell or
+`man` looks for it, for example:
+
+```sh
+# bash (any bash-completion completions directory works)
+mkdir -p ~/.local/share/bash-completion/completions
+slice --generate complete-bash > ~/.local/share/bash-completion/completions/slice
+
+# zsh (any directory on your $fpath works)
+mkdir -p ~/.zfunc  # then add `fpath=(~/.zfunc $fpath)` to ~/.zshrc
+slice --generate complete-zsh > ~/.zfunc/_slice
+
+# fish
+mkdir -p ~/.config/fish/completions
+slice --generate complete-fish > ~/.config/fish/completions/slice.fish
+
+# man page (~/.local/share/man/man1 or /usr/local/share/man/man1)
+mkdir -p ~/.local/share/man/man1
+slice --generate man > ~/.local/share/man/man1/slice.1
+```
+
+The prebuilt archives ship these files ready-made in `complete/` and `doc/`.
 
 ## Docker
 
