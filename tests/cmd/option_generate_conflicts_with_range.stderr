@@ -1,0 +1,5 @@
+error: the argument '--generate <KIND>' cannot be used with one or more of the other specified arguments
+
+Usage: slice[EXE] [OPTIONS] <RANGE> [FILES]...
+
+For more information, try '--help'.

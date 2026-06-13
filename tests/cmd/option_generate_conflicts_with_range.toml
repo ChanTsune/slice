@@ -1,0 +1,3 @@
+bin.name = "slice"
+args = ["--generate", "complete-bash", "1:2"]
+status.code = 2
