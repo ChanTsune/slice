@@ -1,0 +1,215 @@
+# Exercises install.sh / install.ps1 from this checkout (not raw.githubusercontent)
+# so a PR's own installer is what gets tested. The script downloads an existing
+# published release binary and installs it; this asserts the installer resolves
+# the target, fetches the asset, and lays the binary down correctly.
+#
+# Native-runner coverage only. Two release targets have no GitHub-hosted runner
+# and are not covered by CI (only by code review):
+#   - arm-unknown-linux-gnueabihf (32-bit ARM Linux, hard-float glibc — the one
+#                                  non-musl Linux target)
+#   - i686-pc-windows-msvc        (32-bit Windows)
+name: install-test
+on:
+  push:
+    paths:
+      - install.sh
+      - install.ps1
+      - .github/workflows/install-test.yml
+  pull_request:
+    paths:
+      - install.sh
+      - install.ps1
+      - .github/workflows/install-test.yml
+  workflow_dispatch:
+  # Weekly run catches regressions where the latest release loses an asset and
+  # the installer breaks even though the scripts are unchanged. Effective only
+  # once this workflow is on the default branch.
+  schedule:
+    - cron: '17 6 * * 1'
+permissions:
+  contents: read
+jobs:
+  # Unix installer: invoke install.sh exactly as `curl ... | sh` would, by
+  # piping the script over stdin. This also asserts the script does not consume
+  # stdin for its own input.
+  install-test-unix:
+    name: install.sh (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            # Exercise the SLICE_INSTALL_DIR override on one Unix job.
+            custom_dir: true
+          - os: macos-15
+            target: aarch64-apple-darwin
+          # Intentionally a native x86_64 runner (unlike release.yml, which
+          # cross-compiles x86_64-darwin on arm64 macos-15) so the installer's
+          # x86_64 detection path runs natively. If macos-15-intel is retired,
+          # replace it with another native x86_64 macOS runner, not an arm64 one.
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            # Pin a known release on one Unix job.
+            version_env: 0.5.0
+    steps:
+      - uses: actions/checkout@v6
+      # $RUNNER_TEMP / runner paths can't be referenced from matrix.include
+      # (matrix values are fixed before env/runtime contexts exist), so set the
+      # custom install dir in a step ($RUNNER_TEMP is always writable).
+      - name: Use a custom install dir
+        if: ${{ matrix.custom_dir }}
+        run: echo "SLICE_INSTALL_DIR=$RUNNER_TEMP/slice-custom" >> "$GITHUB_ENV"
+      - name: Run install.sh via pipe
+        env:
+          SLICE_VERSION: ${{ matrix.version_env }}
+        run: cat install.sh | sh
+      - name: Resolve install dir
+        id: dir
+        run: |
+          dir="${SLICE_INSTALL_DIR:-$HOME/.local/bin}"
+          echo "bin=$dir/slice" >> "$GITHUB_OUTPUT"
+      - name: Verify version (full path; PATH is not updated for this shell)
+        env:
+          BIN: ${{ steps.dir.outputs.bin }}
+        run: "\"$BIN\" --version"
+      - name: Verify pinned version was installed
+        if: ${{ matrix.version_env }}
+        env:
+          BIN: ${{ steps.dir.outputs.bin }}
+          WANT: ${{ matrix.version_env }}
+        run: |
+          got=$("$BIN" --version)
+          case "$got" in
+            "slice $WANT") echo "ok: $got" ;;
+            *) echo "expected 'slice $WANT', got: $got" >&2; exit 1 ;;
+          esac
+      - name: 'Functional smoke (tail-relative slice -1: returns last line)'
+        env:
+          BIN: ${{ steps.dir.outputs.bin }}
+        run: |
+          got=$(printf 'a\nb\nc\n' | "$BIN" -1:)
+          want=$(printf 'c\n')
+          if [ "$got" != "$want" ]; then
+            printf 'smoke failed: expected %s, got %s\n' "$want" "$got" >&2
+            exit 1
+          fi
+          echo 'smoke ok'
+
+  # Windows installer: invoke install.ps1 by piping the script into pwsh on
+  # stdin, mirroring `irm ... | iex`.
+  install-test-windows:
+    name: install.ps1 (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: pwsh
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            # Exercise both overrides on the second Windows job.
+            custom_dir: true
+            version_env: 0.5.0
+    steps:
+      # install.ps1 is newline-sensitive when piped; keep the checkout as-is (LF).
+      - name: Disable autocrlf
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - uses: actions/checkout@v6
+      # $RUNNER_TEMP / runner paths can't be referenced from matrix.include
+      # (matrix values are fixed before env/runtime contexts exist), so set the
+      # custom install dir in a step ($RUNNER_TEMP is always writable).
+      - name: Use a custom install dir
+        if: ${{ matrix.custom_dir }}
+        run: '"SLICE_INSTALL_DIR=$env:RUNNER_TEMP\slice-custom" >> $env:GITHUB_ENV'
+      - name: Run install.ps1 via pipe
+        env:
+          SLICE_VERSION: ${{ matrix.version_env }}
+        # Mirror `irm ... | iex`: run the script in this pwsh session via
+        # Invoke-Expression. A nested `pwsh -Command -` splits stdin into lines,
+        # breaking the multi-line script; in-session iex runs the whole script
+        # and lets terminating errors fail the step.
+        run: Get-Content install.ps1 -Raw | Invoke-Expression
+      - name: Resolve install dir
+        id: dir
+        run: |
+          $dir = if ($env:SLICE_INSTALL_DIR) { $env:SLICE_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'slice\bin' }
+          "bin=$(Join-Path $dir 'slice.exe')" >> $env:GITHUB_OUTPUT
+      - name: Verify version (full path; PATH is not updated for this shell)
+        env:
+          BIN: ${{ steps.dir.outputs.bin }}
+        run: '& "$env:BIN" --version'
+      - name: Verify pinned version was installed
+        if: ${{ matrix.version_env }}
+        env:
+          BIN: ${{ steps.dir.outputs.bin }}
+          WANT: ${{ matrix.version_env }}
+        run: |
+          $got = & "$env:BIN" --version
+          if ($got -ne "slice $env:WANT") {
+            Write-Error "expected 'slice $env:WANT', got: $got"
+            exit 1
+          }
+          Write-Host "ok: $got"
+      - name: 'Functional smoke (tail-relative slice -1: returns last line)'
+        env:
+          BIN: ${{ steps.dir.outputs.bin }}
+        run: |
+          # Write the exact bytes (LF only) to a file and slice it directly.
+          # A file argument avoids the pipeline's newline injection so the input
+          # is byte-exact 'a\nb\nc\n'.
+          $in = Join-Path $env:RUNNER_TEMP 'smoke.txt'
+          [IO.File]::WriteAllText($in, "a`nb`nc`n")
+          $got = (& "$env:BIN" -1: $in) -join "`n"
+          if ($got -ne 'c') {
+            Write-Error "smoke failed: expected 'c', got '$got'"
+            exit 1
+          }
+          Write-Host 'smoke ok'
+
+  # A missing version must make the installer exit non-zero. Guards the
+  # download-404 path (and, on Windows, exit-code propagation through iex) so a
+  # regression that silently installs nothing cannot pass as success.
+  install-test-unix-missing-version:
+    name: install.sh rejects a missing version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: A missing version must fail
+        env:
+          SLICE_VERSION: 0.0.0-does-not-exist
+        run: |
+          if cat install.sh | sh; then
+            echo 'expected install.sh to fail for a missing version' >&2
+            exit 1
+          fi
+          echo 'ok: install failed as expected'
+
+  install-test-windows-missing-version:
+    name: install.ps1 rejects a missing version
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v6
+      - name: A missing version must fail
+        env:
+          SLICE_VERSION: 0.0.0-does-not-exist
+        run: |
+          $failed = $false
+          try { Get-Content install.ps1 -Raw | Invoke-Expression }
+          catch { $failed = $true; Write-Host "install failed as expected: $($_.Exception.Message)" }
+          if (-not $failed) {
+            Write-Error 'expected install.ps1 to fail for a missing version'
+            exit 1
+          }
