@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.svg" alt="slice" width="210">
+</p>
+
 # Slice
 
 Slice is a command-line tool written in Rust that allows you to slice the contents of a file using syntax similar to Python's slice notation.
