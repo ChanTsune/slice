@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A cheatsheet at <https://chantsune.github.io/slice/> mapping common `head`,
+  `tail`, `sed`, `awk`, and `dd` recipes to their single-syntax `slice`
+  equivalents.
+
 ## [0.5.0] - 2026-06-13
 
 ### Added
