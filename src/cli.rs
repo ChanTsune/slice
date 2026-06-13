@@ -1,7 +1,18 @@
 use crate::range::SliceRange;
 use bytesize::ByteSize;
-use clap::{ArgGroup, Parser};
+use clap::{ArgGroup, Parser, ValueEnum};
 use std::{path::PathBuf, str::FromStr};
+
+// `CompletePowershell` (not `CompletePowerShell`) so the kebab-cased value is
+// `complete-powershell` rather than `complete-power-shell`.
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, ValueEnum)]
+pub(crate) enum Generate {
+    CompleteBash,
+    CompleteZsh,
+    CompleteFish,
+    CompletePowershell,
+    Man,
+}
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub struct NonZeroByteSize(ByteSize);
@@ -30,11 +41,16 @@ impl FromStr for NonZeroByteSize {
     group(ArgGroup::new("mode").args(["lines", "bytes", "delimiter", "null"])),
 )]
 pub(crate) struct Args {
-    // Required so tail-relative ranges (`-5:`) survive flag parsing; the
-    // trade-off is that an unknown flag in range position is reported as an
-    // invalid <RANGE> value (still exit 2).
+    // `allow_hyphen_values` is required so tail-relative ranges (`-5:`)
+    // survive flag parsing; the trade-off is that an unknown flag in range
+    // position is reported as an invalid <RANGE> value (still exit 2).
+    // The field is an Option with an explicit `required = true`: clap skips
+    // required-argument validation when an `exclusive` arg (`--generate`) is
+    // present, and the explicit requiredness keeps `<RANGE>` (not `[RANGE]`)
+    // in the usage line.
     #[arg(
         allow_hyphen_values = true,
+        required = true,
         help = "The slice syntax is similar to Python's slice syntax, with the format `start:end:step`.
 Each value is optional and, if omitted, defaults to the start of the file, the end of the file, and a step of 1, respectively.
 Negative start/end values count back from the end of the input, like Python.
@@ -42,7 +58,7 @@ e.g., '50:100', '50:100:1', '-5:'
 and the extended syntax 'start:+line' is supported. (experimental)
 e.g., '50:+50'"
     )]
-    pub(crate) range: SliceRange,
+    pub(crate) range: Option<SliceRange>,
     #[arg(short, help = "Slice the lines (default)")]
     pub(crate) lines: bool,
     // `-c` is a hidden short alias kept for backward compatibility.
@@ -64,6 +80,13 @@ e.g., '50:+50'"
         help = "Explain what the range selects and exit without reading input. Any FILES are ignored"
     )]
     pub(crate) explain: bool,
+    #[arg(
+        long,
+        value_name = "KIND",
+        exclusive = true,
+        help = "Generate the shell completion script or man page and exit without reading input"
+    )]
+    pub(crate) generate: Option<Generate>,
     #[arg(
         short,
         help = "Suppresses printing of headers when multiple files are being examined"
@@ -155,11 +178,11 @@ mod tests {
         assert!(args.lines);
         assert_eq!(
             args.range,
-            SliceRange {
+            Some(SliceRange {
                 start: SliceIndex::FromStart(0),
                 end: None,
                 step: NonZeroUsize::new(1),
-            }
+            })
         );
         assert_eq!(args.files, vec![PathBuf::from("text.txt")]);
     }
@@ -170,11 +193,11 @@ mod tests {
         assert!(args.bytes);
         assert_eq!(
             args.range,
-            SliceRange {
+            Some(SliceRange {
                 start: SliceIndex::FromStart(0),
                 end: None,
                 step: NonZeroUsize::new(1),
-            }
+            })
         );
         assert_eq!(args.files, vec![PathBuf::from("text.txt")]);
     }
@@ -199,21 +222,21 @@ mod tests {
             step: None,
         };
         let args = Args::parse_from(["slice", "-5:"]);
-        assert_eq!(args.range, tail);
+        assert_eq!(args.range, Some(tail.clone()));
 
         let args = Args::parse_from(["slice", "-l", "-5:", "text.txt"]);
         assert!(args.lines);
-        assert_eq!(args.range, tail);
+        assert_eq!(args.range, Some(tail.clone()));
         assert_eq!(args.files, vec![PathBuf::from("text.txt")]);
 
         let args = Args::parse_from(["slice", "-5:", "-l", "text.txt"]);
         assert!(args.lines);
-        assert_eq!(args.range, tail);
+        assert_eq!(args.range, Some(tail.clone()));
         assert_eq!(args.files, vec![PathBuf::from("text.txt")]);
 
         let args = Args::parse_from(["slice", "--explain", "-5:"]);
         assert!(args.explain);
-        assert_eq!(args.range, tail);
+        assert_eq!(args.range, Some(tail.clone()));
     }
 
     #[test]
@@ -222,11 +245,11 @@ mod tests {
         assert!(args.explain);
         assert_eq!(
             args.range,
-            SliceRange {
+            Some(SliceRange {
                 start: SliceIndex::FromStart(10),
                 end: Some(SliceIndex::FromStart(20)),
                 step: None,
-            }
+            })
         );
     }
 
@@ -320,5 +343,41 @@ mod tests {
     #[test]
     fn escape_requires_delimiter() {
         assert!(Args::try_parse_from(["slice", "-e", "0:"]).is_err());
+    }
+
+    #[test]
+    fn generate_parses_without_range() {
+        let args = Args::parse_from(["slice", "--generate", "man"]);
+        assert_eq!(args.generate, Some(Generate::Man));
+        assert_eq!(args.range, None);
+    }
+
+    #[test]
+    fn generate_value_enum_kebab_names() {
+        for (value, expected) in [
+            ("complete-bash", Generate::CompleteBash),
+            ("complete-zsh", Generate::CompleteZsh),
+            ("complete-fish", Generate::CompleteFish),
+            ("complete-powershell", Generate::CompletePowershell),
+            ("man", Generate::Man),
+        ] {
+            let args = Args::parse_from(["slice", "--generate", value]);
+            assert_eq!(args.generate, Some(expected), "value {value}");
+        }
+        assert!(Args::try_parse_from(["slice", "--generate", "complete-power-shell"]).is_err());
+    }
+
+    #[test]
+    fn generate_excludes_all_other_args() {
+        assert!(Args::try_parse_from(["slice", "--generate", "complete-bash", "1:2"]).is_err());
+        assert!(Args::try_parse_from(["slice", "--generate", "man", "-l"]).is_err());
+        assert!(Args::try_parse_from(["slice", "--generate", "man", "--explain"]).is_err());
+        assert!(Args::try_parse_from(["slice", "--generate", "man", "file.txt"]).is_err());
+    }
+
+    #[test]
+    fn range_still_required_without_generate() {
+        assert!(Args::try_parse_from(["slice"]).is_err());
+        assert!(Args::try_parse_from(["slice", "-l"]).is_err());
     }
 }

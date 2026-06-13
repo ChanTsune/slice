@@ -201,6 +201,32 @@ fn explain_mode<W: Write>(mut output: W, range: &SliceRange, unit: &str) -> io::
     output.flush()
 }
 
+// The completion scripts and the man page must name the installed binary
+// (`slice`), not the crate (`slice-command`); Args pins the Command name to
+// CARGO_BIN_NAME, so both generators inherit it.
+fn generate_mode<W: Write>(mut output: W, kind: cli::Generate) -> io::Result<()> {
+    use clap_complete::aot::{Generator, Shell};
+    let mut cmd = cli::Args::command();
+    let shell = match kind {
+        cli::Generate::CompleteBash => Shell::Bash,
+        cli::Generate::CompleteZsh => Shell::Zsh,
+        cli::Generate::CompleteFish => Shell::Fish,
+        cli::Generate::CompletePowershell => Shell::PowerShell,
+        cli::Generate::Man => {
+            clap_mangen::Man::new(cmd).render(&mut output)?;
+            return output.flush();
+        }
+    };
+    // try_generate instead of clap_complete::aot::generate: the latter panics
+    // on writer failure, while an io::Result keeps a closed pipe a quiet
+    // success like every other output path (see stdout_status).
+    let name = cmd.get_name().to_owned();
+    cmd.set_bin_name(name);
+    cmd.build();
+    shell.try_generate(&cmd, &mut output)?;
+    output.flush()
+}
+
 #[inline]
 fn copy_mode<R: BufRead, W: Write>(mut input: R, mut output: W) -> io::Result<()> {
     io::copy(&mut input, &mut output)?;
@@ -563,6 +589,9 @@ fn regular_len(file: &fs::File) -> Option<u64> {
 }
 
 fn entry(args: cli::Args) -> bool {
+    if let Some(kind) = args.generate {
+        return stdout_status(generate_mode(stdout().lock(), kind));
+    }
     let io_buffer_size = args.io_buffer_size();
     let delimiter = match args.delimiter() {
         Ok(delimiter) => delimiter,
@@ -570,7 +599,11 @@ fn entry(args: cli::Args) -> bool {
             .error(clap::error::ErrorKind::ValueValidation, e)
             .exit(),
     };
-    let range = args.range;
+    let Some(range) = args.range else {
+        // clap only waives the required <RANGE> when the exclusive
+        // --generate is present, and that case returned above.
+        unreachable!("<RANGE> is required when --generate is absent");
+    };
     if args.explain {
         let unit = if args.bytes {
             "byte"
@@ -810,6 +843,59 @@ mod tests {
                 .expect_err("a failing flush must surface its error");
 
             assert_eq!(err.kind(), io::ErrorKind::Other);
+        }
+    }
+
+    mod generate {
+        use super::*;
+        use clap::ValueEnum;
+
+        #[test]
+        fn every_kind_emits_output() {
+            for kind in cli::Generate::value_variants() {
+                let mut out = Vec::new();
+                generate_mode(&mut out, *kind).expect("generation must succeed");
+                assert!(!out.is_empty(), "{kind:?} produced no output");
+            }
+        }
+
+        // The artifacts must name the installed binary, not the crate
+        // (`slice-command`).
+        #[test]
+        fn bash_completion_names_the_binary() {
+            let mut out = Vec::new();
+            generate_mode(&mut out, cli::Generate::CompleteBash).expect("");
+            let script = String::from_utf8(out).expect("completion scripts are text");
+            assert!(script.contains("_slice()"));
+            assert!(!script.contains("slice-command"));
+        }
+
+        #[test]
+        fn man_page_titles_the_binary() {
+            let mut out = Vec::new();
+            generate_mode(&mut out, cli::Generate::Man).expect("");
+            let page = String::from_utf8(out).expect("the man page is roff text");
+            assert!(page.contains("\n.TH slice 1"), "missing title: {page}");
+            assert!(!page.contains("slice-command"));
+        }
+
+        // Both generators must surface writer failures as io::Result (not
+        // panic), so a closed pipe stays a quiet success via stdout_status.
+        #[test]
+        fn surfaces_write_errors() {
+            struct FailWriter;
+            impl Write for FailWriter {
+                fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                    Err(io::Error::other("write failed"))
+                }
+                fn flush(&mut self) -> io::Result<()> {
+                    Err(io::Error::other("flush failed"))
+                }
+            }
+            for kind in [cli::Generate::Man, cli::Generate::CompleteBash] {
+                generate_mode(FailWriter, kind)
+                    .expect_err("a failing writer must surface its error");
+            }
         }
     }
 
