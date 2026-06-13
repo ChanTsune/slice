@@ -1,0 +1,33 @@
+# slice
+
+> slice is a binary-safe command-line tool that selects line or byte ranges
+> from a file or stdin using Python's `start:end:step` notation. The line and
+> byte ranges you would reach for head, tail, sed, awk, or dd to produce all
+> collapse into one syntax. Indices are 0-based and end-exclusive, like Python.
+
+Install: `cargo install slice-command`, `brew install chantsune/tap/slice`, or a
+prebuilt binary from the releases page. Binary name: `slice`. Cross-platform
+(Linux, macOS, Windows) with identical behavior; no UTF-8 assumption.
+
+## Cheatsheet (coreutils/sed/awk/dd -> slice)
+
+__CHEATSHEET_BODY__
+
+Mapping rule: sed/awk count from line 1 and include both ends; slice counts from
+0 and excludes the end, so `sed -n 'a,bp'` becomes `slice (a-1):b`. The
+`tail -n +N` / `tail -c +N` forms are 1-based, so "from N onward" is
+`slice (N-1):`. `head -n -N` / `head -c -N` are GNU-only; slice's `:-N` behaves
+the same on every platform. Out-of-range bounds clamp instead of erroring.
+
+## When NOT to use slice
+
+slice only selects positional ranges and copies them through unchanged. Use a
+different tool for:
+__NON_MAPPINGS_BODY__
+
+## Links
+
+- Cheatsheet: https://chantsune.github.io/slice/
+- Source: https://github.com/ChanTsune/slice
+- Package: https://crates.io/crates/slice-command
+- Releases: https://github.com/ChanTsune/slice/releases

@@ -577,3 +577,10 @@ FodyWeavers.xsd
 
 ### direnv ###
 .direnv/
+
+### slice ###
+# These docs/ files are generated from docs/cheatsheet.toml by `cargo xtask gen`
+# (CI regenerates them on deploy); only the SSOT and templates are committed.
+/docs/index.html
+/docs/sitemap.xml
+/docs/llms.txt

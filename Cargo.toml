@@ -1,3 +1,6 @@
+[workspace]
+members = ["xtask"]
+
 [package]
 name = "slice-command"
 version = "0.5.0"
@@ -10,6 +13,10 @@ repository = "https://github.com/ChanTsune/slice.git"
 categories = ["text-processing", "command-line-utilities"]
 keywords = ["text", "utility", "tool"]
 rust-version = "1.85"
+# `docs/` is the GitHub Pages source (cheatsheet SSOT + generated HTML) and
+# `.cargo/` holds the local `cargo xtask` alias; both are repository tooling,
+# not part of the published crate.
+exclude = ["/docs", "/.cargo"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
