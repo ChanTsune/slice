@@ -22,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `-z`/`--null` to use NUL (`\0`) as the delimiter.
 - `-e`/`--escape` to interpret backslash escapes (`\t`, `\n`, `\r`, `\0`,
   `\\`, `\xHH`) in `--delimiter`.
+- `--generate <KIND>` flag that prints a shell completion script
+  (`complete-bash`, `complete-zsh`, `complete-fish`, `complete-powershell`) or
+  the man page (`man`) to stdout, without reading any input. Release archives
+  now ship the generated completions (`complete/`) and man page (`doc/`).
+- `cargo binstall slice-command` installs the prebuilt release binaries.
+- Prebuilt release binaries for Windows on ARM (`aarch64-pc-windows-msvc`)
+  and 64-bit ARM Linux (`aarch64-unknown-linux-musl`).
 
 ### Changed
 
