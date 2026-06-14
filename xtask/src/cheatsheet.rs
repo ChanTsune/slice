@@ -95,6 +95,11 @@ impl Group {
 
     /// Display order of the sections.
     pub const ORDER: [Group; 4] = [Group::Line, Group::Byte, Group::Stepped, Group::Special];
+
+    /// Sections the README shows inline. The README is the showcase, not the
+    /// full reference: it keeps the common line ranges and defers byte ranges,
+    /// every-Nth-line, and NUL records to the docs site.
+    pub const README_ORDER: [Group; 1] = [Group::Line];
 }
 
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
