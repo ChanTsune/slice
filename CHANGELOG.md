@@ -12,19 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `--translate` flag that prints the equivalent `head`/`tail`/`sed`/`awk`/`dd`
-  command for a range and mode, then exits without reading input — the inverse
-  of the cheatsheet, for porting a `slice` call to a box that lacks it. An
-  optional dialect (`--translate=posix`/`bsd`/`gnu`/`awk`/`all`) picks the
-  spelling; with no value the build target's native toolset is used. Each line
-  carries a portability tier so it is clear which commands need GNU coreutils,
-  and forms with no faithful single-command equivalent (custom/NUL delimiters,
-  strided bytes, length-dependent ranges) say so instead of misleading you.
-- A cheatsheet at <https://chantsune.github.io/slice/> mapping common `head`,
-  `tail`, `sed`, `awk`, and `dd` recipes to their single-syntax `slice`
-  equivalents.
-- One-line install scripts that download the matching prebuilt binary from the
-  latest release: `install.sh` for Linux/macOS (`curl … | sh`) and `install.ps1`
-  for Windows (`irm … | iex`).
+  command for a range, for porting a `slice` call to a box that lacks it.
+- A cheatsheet at <https://chantsune.github.io/slice/> mapping common
+  `head`/`tail`/`sed`/`awk`/`dd` recipes to `slice`.
+- One-line install for Linux/macOS (`curl … | sh`) and Windows (`irm … | iex`).
 
 ## [0.5.0] - 2026-06-13
 
