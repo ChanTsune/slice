@@ -55,9 +55,10 @@ pub fn splice_readme(readme: &str, table: &str) -> Result<String, String> {
     Ok(out)
 }
 
-/// The README table is the compact view: one table per group, plus a short
-/// pointer to the full GitHub Pages cheatsheet. The full "When NOT to use
-/// slice" and caveats sections live on Pages to keep the README lean.
+/// The README table is the compact view: a table for each `README_ORDER`
+/// group, plus a short pointer to the full GitHub Pages cheatsheet. Byte
+/// ranges, every-Nth-line, NUL records, the "When NOT to use slice" section,
+/// and the caveats all live on Pages to keep the README lean.
 pub fn render_readme_table(sheet: &Cheatsheet) -> String {
     let mut out = String::new();
     out.push_str(
@@ -66,7 +67,7 @@ pub fn render_readme_table(sheet: &Cheatsheet) -> String {
          \"when NOT to use slice\" section) lives at\n\
          <https://chantsune.github.io/slice/>.\n\n",
     );
-    for group in Group::ORDER {
+    for group in Group::README_ORDER {
         let rows: Vec<&Row> = sheet.rows.iter().filter(|r| r.group == group).collect();
         if rows.is_empty() {
             continue;

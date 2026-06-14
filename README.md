@@ -32,6 +32,20 @@ The script downloads the matching prebuilt binary from the latest GitHub release
 and installs it. Set `SLICE_VERSION` to pin a version or `SLICE_INSTALL_DIR` to
 choose the install location.
 
+### Prebuilt binaries
+
+Prebuilt archives for Linux, macOS, and Windows (x86 and ARM) are published on
+the [GitHub Releases](https://github.com/ChanTsune/slice/releases) page; see that
+page for the targets covered by the latest release. Each archive bundles shell
+completions (`complete/`) and the man page (`doc/`) alongside the binary.
+
+[`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall) fetches and
+installs the matching archive automatically:
+
+```sh
+cargo binstall slice-command
+```
+
 ### Via Homebrew
 
 ```sh
@@ -48,20 +62,6 @@ nix-env --install -f https://github.com/chantsune/slice/tarball/main
 
 ```sh
 cargo install slice-command
-```
-
-### Prebuilt binaries
-
-Prebuilt archives for Linux, macOS, and Windows (x86 and ARM) are published on
-the [GitHub Releases](https://github.com/ChanTsune/slice/releases) page; see that
-page for the targets covered by the latest release. Each archive bundles shell
-completions (`complete/`) and the man page (`doc/`) alongside the binary.
-
-[`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall) fetches and
-installs the matching archive automatically:
-
-```sh
-cargo binstall slice-command
 ```
 
 ### From Source (via Cargo)
@@ -139,32 +139,6 @@ version (byte ranges, every-Nth-line, NUL records, caveats, and a
 | Line 7 only | `sed -n '7p'  /  awk 'NR==7'` | `slice 6:7` |
 | From line 10 to the end | `sed -n '10,$p'` | `slice 9:` |
 
-#### Byte ranges from a file (head -c, tail -c, dd without dd)
-
-| Task | coreutils / sed / awk / dd | slice |
-| --- | --- | --- |
-| First 5 bytes | `head -c 5` | `slice -b :5` |
-| Last 5 bytes | `tail -c 5` | `slice -b -5:` |
-| All but the last 5 bytes | `head -c -5` | `slice -b :-5` |
-| From byte 6 to the end | `tail -c +6` | `slice -b 5:` |
-| Bytes 5 through 14 | `dd bs=1 skip=5 count=10` | `slice -b 5:15` |
-| First 4 bytes | `dd bs=1 count=4` | `slice -b 0:4` |
-| From byte 10 to the end | `dd bs=1 skip=10` | `slice -b 10:` |
-| A block range (bs=4 skip=1 count=2) | `dd bs=4 skip=1 count=2` | `slice -b 4:12` |
-
-#### Every Nth line (sed/awk only — slice does it too)
-
-| Task | coreutils / sed / awk / dd | slice |
-| --- | --- | --- |
-| Odd lines (1, 3, 5, ...) | `sed -n '1~2p'  /  awk 'NR%2==1'` | `slice ::2` |
-| Even lines (2, 4, 6, ...) | `sed -n '2~2p'  /  awk 'NR%2==0'` | `slice 1::2` |
-
-#### NUL-delimited records and other special cases
-
-| Task | coreutils / sed / awk / dd | slice |
-| --- | --- | --- |
-| Last NUL-delimited record (find -print0 style) | `—` | `slice -z -1:` |
-
 <!-- CHEATSHEET:END -->
 
 The bounds follow Python rather than coreutils where the two disagree: `-0`
@@ -172,10 +146,9 @@ equals `0`, so `slice -0:` selects the whole input (where `tail -n 0` selects
 nothing) and `slice :-0` selects nothing (where GNU `head -n -0` selects
 everything).
 
-A tail-relative `start` (`-N:`) cannot emit anything until the input ends, and
-holds the last `N` elements in memory while it reads — the same shape as
-`tail`. A tail-relative `end` (`:-N`) stays streaming: each element is emitted
-as soon as `N` more have arrived, so only `N` elements are ever held.
+A tail-relative `start` (`-N:`) cannot emit anything until the input ends — the
+same shape as `tail` — whereas a tail-relative `end` (`:-N`) streams its output
+as it reads.
 
 ```sh
 find . -type f -print0 | slice 0:100 -z
@@ -255,34 +228,8 @@ docker run -v `pwd`:`pwd` -w `pwd` --rm -i slice
 
 ## Development
 
-### Dev Container
-
-Open the repository in a [Dev Container](https://containers.dev/) (VS Code "Reopen in Container" or GitHub Codespaces) to get a ready-to-use environment.
-The container installs the toolchain declared in `flake.nix` via Nix and activates it automatically with [direnv](https://direnv.net/), so `cargo test` works out of the box.
-
-### Tests
-
-Run the unit tests and the end-to-end CLI tests together:
-
-```sh
-cargo test
-```
-
-CLI behavior is locked under `tests/cmd/` via [`trycmd`]: each `*.toml` case runs the built
-`slice` binary and compares its stdout, stderr, and exit code against sibling golden files.
-
-After an intentional behavior change, regenerate the expected outputs and review the diff:
-
-```sh
-TRYCMD=overwrite cargo test --test cli   # update existing golden files in place
-```
-
-When adding a brand-new case, write its `*.toml` (plus `*.stdin` and/or `*.in/`), capture the
-actual output with `TRYCMD=dump cargo test --test cli`, and copy `dump/<name>.stdout` /
-`dump/<name>.stderr` into `tests/cmd/`. Keep OS-specific lines redacted with `[..]` (currently the
-I/O-error message and the `--version` string).
-
-[`trycmd`]: https://docs.rs/trycmd
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development environment (Dev
+Container) and how to run and regenerate the tests.
 
 ## License
 
