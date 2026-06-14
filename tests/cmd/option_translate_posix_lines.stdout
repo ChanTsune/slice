@@ -1,0 +1,2 @@
+sed -n '2,5p'
+# tier: posix

@@ -1,0 +1,2 @@
+dd bs=1 count=5 2>/dev/null
+# tier: posix

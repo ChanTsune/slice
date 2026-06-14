@@ -42,6 +42,20 @@ fn slice_mode(bytes: bool, delimiter: Option<&[u8]>) -> SliceMode<'_> {
     }
 }
 
+/// `--translate` only needs the element kind, not the delimiter bytes, so it
+/// classifies through `slice_mode` rather than re-deriving the taxonomy — an
+/// empty `--delimiter` must reach `Bytes` here too, not `Custom`.
+impl From<&SliceMode<'_>> for range::TranslateMode {
+    #[inline]
+    fn from(mode: &SliceMode<'_>) -> Self {
+        match mode {
+            SliceMode::Lines => range::TranslateMode::Lines,
+            SliceMode::Bytes => range::TranslateMode::Bytes,
+            SliceMode::Custom(_) => range::TranslateMode::Custom,
+        }
+    }
+}
+
 #[inline]
 fn buf_reader<R: Read>(reader: R, capacity: Option<usize>) -> io::BufReader<R> {
     if let Some(capacity) = capacity {
@@ -198,6 +212,17 @@ where
 #[inline]
 fn explain_mode<W: Write>(mut output: W, range: &SliceRange, unit: &str) -> io::Result<()> {
     output.write_all(range.explain(unit).as_bytes())?;
+    output.flush()
+}
+
+#[inline]
+fn translate_mode<W: Write>(
+    mut output: W,
+    range: &SliceRange,
+    mode: range::TranslateMode,
+    dialect: range::TranslateDialect,
+) -> io::Result<()> {
+    output.write_all(range.translate(mode, dialect).as_bytes())?;
     output.flush()
 }
 
@@ -604,17 +629,23 @@ fn entry(args: cli::Args) -> bool {
         // --generate is present, and that case returned above.
         unreachable!("<RANGE> is required when --generate is absent");
     };
+    // One classification feeds --explain, --translate, and the slicing
+    // dispatch, so the empty delimiter (folded to Bytes by slice_mode) is
+    // treated identically by all three — never a "part"/Custom on one path and
+    // a byte on another.
+    let mode = slice_mode(args.bytes, delimiter.as_deref());
     if args.explain {
-        let unit = if args.bytes {
-            "byte"
-        } else if delimiter.is_some() {
-            "part"
-        } else {
-            "line"
+        let unit = match mode {
+            SliceMode::Bytes => "byte",
+            SliceMode::Custom(_) => "part",
+            SliceMode::Lines => "line",
         };
         return stdout_status(explain_mode(stdout().lock(), &range, unit));
     }
-    let mode = slice_mode(args.bytes, delimiter.as_deref());
+    if let Some(dialect) = args.translate {
+        let tmode = range::TranslateMode::from(&mode);
+        return stdout_status(translate_mode(stdout().lock(), &range, tmode, dialect));
+    }
     let plan = range.plan();
     if args.files.is_empty() {
         let input = buf_reader(stdin().lock(), io_buffer_size);
@@ -692,6 +723,33 @@ mod tests {
 
     fn resolved_plan(range: &str) -> SlicePlan {
         resolved_plan_of(&SliceRange::from_str(range).unwrap())
+    }
+
+    mod translate_classification {
+        use super::*;
+        use crate::range::TranslateMode;
+
+        // The translate taxonomy must mirror slice_mode; the empty delimiter is
+        // the case that previously diverged (classified Custom instead of Bytes).
+        #[test]
+        fn mirrors_slice_mode_including_empty_delimiter() {
+            assert_eq!(
+                TranslateMode::from(&slice_mode(true, None)),
+                TranslateMode::Bytes
+            );
+            assert_eq!(
+                TranslateMode::from(&slice_mode(false, None)),
+                TranslateMode::Lines
+            );
+            assert_eq!(
+                TranslateMode::from(&slice_mode(false, Some(&b","[..]))),
+                TranslateMode::Custom
+            );
+            assert_eq!(
+                TranslateMode::from(&slice_mode(false, Some(&b""[..]))),
+                TranslateMode::Bytes
+            );
+        }
     }
 
     mod line {

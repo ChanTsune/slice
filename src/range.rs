@@ -31,6 +31,47 @@ pub(crate) struct SliceRange {
     pub(crate) step: Option<NonZeroUsize>,
 }
 
+/// What an element is, for `--translate`. Mirrors the `SliceMode` taxonomy in
+/// `main.rs` but drops the borrowed delimiter bytes — the translation only
+/// needs the kind to pick a tool family.
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+pub(crate) enum TranslateMode {
+    Lines,
+    Bytes,
+    Custom,
+}
+
+/// Which spelling `--translate` prints. The bare flag resolves to the build
+/// target's native toolset (see `cli.rs`), so the value is always the user's
+/// explicit choice or that platform default.
+// Plain comments, not doc comments: a `///` on a ValueEnum variant makes clap
+// expand the `--help` possible-values list (and switch the whole option block to
+// the long layout), diverging from `--generate`'s inline style. The dialect
+// meanings live in the README and the help text instead.
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, clap::ValueEnum)]
+pub(crate) enum TranslateDialect {
+    // Strictly POSIX.1-portable.
+    Posix,
+    // POSIX plus the common BSD/macOS extensions (`head -c`).
+    Bsd,
+    // GNU coreutils (`sed -n 'F~Sp'`, `head -n -N`, `head -c`).
+    Gnu,
+    // `awk` one-liners.
+    Awk,
+    // Every dialect, one spelling per line.
+    All,
+}
+
+/// The four concrete dialects `All` expands into. Separate from the public
+/// `TranslateDialect` so the renderer never has to handle `All` recursively.
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+enum Dialect {
+    Posix,
+    Bsd,
+    Gnu,
+    Awk,
+}
+
 /// Which numeric field of a `start:end:step` range failed to parse.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub(crate) enum RangeField {
@@ -195,6 +236,68 @@ impl SliceRange {
                 explain_lag(start, back, step, unit)
             }
             (SliceIndex::FromEnd(back), end) => explain_tail(back, end, step, unit),
+        }
+    }
+
+    /// Render the nearest equivalent shell command(s) for this range and
+    /// `mode`, without reading any input. Mirrors [`Self::explain`]: the same
+    /// four `(start, end)` arms, classified once into a candidate per dialect.
+    pub(crate) fn translate(&self, mode: TranslateMode, dialect: TranslateDialect) -> String {
+        // Universal cases, independent of dialect and element kind.
+        match self.plan() {
+            Plan::Resolved(SlicePlan::Empty) => {
+                return "# the range selects nothing (empty)\n".to_owned();
+            }
+            // Whole input, byte-for-byte, in every mode.
+            Plan::Resolved(SlicePlan::Copy) => return render_single("cat", "posix", None),
+            _ => {}
+        }
+        let step = self.step.map_or(1, NonZeroUsize::get);
+        match dialect {
+            TranslateDialect::All => {
+                let mut out = String::new();
+                for d in [Dialect::Posix, Dialect::Bsd, Dialect::Gnu, Dialect::Awk] {
+                    let label = format!("{}:", dialect_label(d));
+                    match self.candidate(mode, step, d) {
+                        Ok((cmd, _, _)) => out.push_str(&format!("# {label:<7}{cmd}\n")),
+                        Err(_) => out.push_str(&format!("# {label:<7}(no equivalent)\n")),
+                    }
+                }
+                out
+            }
+            TranslateDialect::Posix => self.render(mode, step, Dialect::Posix),
+            TranslateDialect::Bsd => self.render(mode, step, Dialect::Bsd),
+            TranslateDialect::Gnu => self.render(mode, step, Dialect::Gnu),
+            TranslateDialect::Awk => self.render(mode, step, Dialect::Awk),
+        }
+    }
+
+    fn render(&self, mode: TranslateMode, step: usize, dialect: Dialect) -> String {
+        match self.candidate(mode, step, dialect) {
+            Ok((cmd, tier, note)) => render_single(&cmd, tier, note),
+            Err(reason) => render_untranslatable(reason),
+        }
+    }
+
+    /// The command for one concrete dialect, or `Err(reason)` when that dialect
+    /// has no faithful single-command equivalent. `Empty`/`Copy` are handled by
+    /// the caller, so the resolved arms here always select something.
+    fn candidate(
+        &self,
+        mode: TranslateMode,
+        step: usize,
+        dialect: Dialect,
+    ) -> Result<Cmd, &'static str> {
+        use SliceIndex::*;
+        match (self.start, self.end) {
+            (FromStart(start), None) => translate_unbounded(start, step, mode, dialect),
+            (FromStart(start), Some(FromStart(end))) => {
+                translate_bounded(start, end, step, mode, dialect)
+            }
+            (FromStart(start), Some(FromEnd(back))) => {
+                translate_lag(start, back, step, mode, dialect)
+            }
+            (FromEnd(back), end) => translate_tail(back, end, step, mode, dialect),
         }
     }
 }
@@ -386,6 +489,251 @@ fn explain_tail(back: NonZeroUsize, end: Option<SliceIndex>, step: usize, unit: 
         Some(SliceIndex::FromStart(_)) => out.push_str("count: depends on the input length\n"),
     }
     out
+}
+
+/// A rendered translation: the shell command, its intrinsic portability tier
+/// label (`posix`/`bsd`/`gnu`), and an optional caveat shown in single-dialect
+/// output.
+type Cmd = (String, &'static str, Option<&'static str>);
+
+const CUSTOM_REASON: &str = "no standard tool selects records by a custom delimiter";
+const STEP_BYTE_REASON: &str = "strided byte selection has no standard-tool equivalent";
+const AWK_BYTE_REASON: &str = "awk operates on lines, not byte offsets";
+const AWK_NEWLINE_NOTE: &str =
+    "awk re-terminates an unterminated final line and may drop bytes after an embedded NUL";
+const AWK_TAIL_REASON: &str =
+    "selecting relative to the end needs buffering, not a clean awk one-liner";
+const LAG_START_REASON: &str =
+    "a head-relative start with a tail-relative end needs the input length";
+const LAG_STEP_REASON: &str =
+    "a tail-relative end combined with a step has no standard-tool equivalent";
+const DROP_LAST_LINES_REASON: &str =
+    "no POSIX single command drops the last N lines; GNU has `head -n -N`";
+const DROP_LAST_BYTES_REASON: &str =
+    "no POSIX single command drops the last N bytes; GNU has `head -c -N`";
+const TAIL_STEP_REASON: &str =
+    "a tail-relative start combined with a step has no standard-tool equivalent";
+const TAIL_BOUNDED_REASON: &str = "a tail-relative start with a fixed end needs the input length";
+const HEAD_C_NOTE: &str = "head -c is not in POSIX; present on BSD and GNU";
+
+fn dialect_label(dialect: Dialect) -> &'static str {
+    match dialect {
+        Dialect::Posix => "posix",
+        Dialect::Bsd => "bsd",
+        Dialect::Gnu => "gnu",
+        Dialect::Awk => "awk",
+    }
+}
+
+fn render_single(cmd: &str, tier: &str, note: Option<&str>) -> String {
+    match note {
+        Some(note) => format!("{cmd}\n# tier: {tier}  ({note})\n"),
+        None => format!("{cmd}\n# tier: {tier}\n"),
+    }
+}
+
+fn render_untranslatable(reason: &str) -> String {
+    format!("# no equivalent: {reason}\n# tier: slice-only\n")
+}
+
+/// Build the awk condition for a stepped line selection. `first` is the 1-based
+/// first row; `end` is the inclusive 1-based last row when bounded.
+fn awk_stepped(first: usize, step: usize, end: Option<usize>) -> String {
+    let mut cond = if first == 1 {
+        format!("NR%{step}==1")
+    } else {
+        format!("NR>={first} && (NR-{first})%{step}==0")
+    };
+    if let Some(end) = end {
+        cond = format!("{cond} && NR<={end}");
+    }
+    format!("awk '{cond}'")
+}
+
+/// `start:` — unbounded from a head-relative start. `start == 0 && step == 1`
+/// is the Copy fast path, handled before this is reached.
+fn translate_unbounded(
+    start: usize,
+    step: usize,
+    mode: TranslateMode,
+    dialect: Dialect,
+) -> Result<Cmd, &'static str> {
+    match mode {
+        TranslateMode::Custom => return Err(CUSTOM_REASON),
+        TranslateMode::Bytes if step > 1 => return Err(STEP_BYTE_REASON),
+        _ => {}
+    }
+    // Saturating, like the explain sites: `start` can be usize::MAX (the range
+    // `18446744073709551615:` parses to FromStart(MAX)) and a plain `+ 1` would
+    // overflow-panic in debug and silently wrap in release.
+    let first = start.saturating_add(1); // 1-based
+    if step == 1 {
+        match mode {
+            TranslateMode::Lines => match dialect {
+                Dialect::Awk => Ok((
+                    format!("awk 'NR>={first}'"),
+                    "posix",
+                    Some(AWK_NEWLINE_NOTE),
+                )),
+                _ => Ok((format!("tail -n +{first}"), "posix", None)),
+            },
+            TranslateMode::Bytes => match dialect {
+                Dialect::Awk => Err(AWK_BYTE_REASON),
+                _ => Ok((format!("tail -c +{first}"), "posix", None)),
+            },
+            TranslateMode::Custom => unreachable!(),
+        }
+    } else {
+        // Unbounded stepped: lines only (byte and custom errored above).
+        match dialect {
+            Dialect::Gnu => Ok((format!("sed -n '{first}~{step}p'"), "gnu", None)),
+            _ => Ok((
+                awk_stepped(first, step, None),
+                "posix",
+                Some(AWK_NEWLINE_NOTE),
+            )),
+        }
+    }
+}
+
+/// `start:end` — bounded window or bounded stepped. `start < end` always (the
+/// empty case is handled before this is reached); `end` is the inclusive
+/// 1-based last row, since the 0-based exclusive end equals it.
+fn translate_bounded(
+    start: usize,
+    end: usize,
+    step: usize,
+    mode: TranslateMode,
+    dialect: Dialect,
+) -> Result<Cmd, &'static str> {
+    if mode == TranslateMode::Custom {
+        return Err(CUSTOM_REASON);
+    }
+    // A byte step matters only if a second selected byte falls within
+    // [start, end); when it does not (`end - start <= step`), the range picks
+    // the single byte at `start` — identical to the unstepped one-byte window —
+    // so collapse it onto the dd/head -c path. A step that does reach a second
+    // byte is a genuine stride with no standard-tool equivalent.
+    let (end, step) = if mode == TranslateMode::Bytes && step > 1 {
+        if end - start > step {
+            return Err(STEP_BYTE_REASON);
+        }
+        (start.saturating_add(1), 1)
+    } else {
+        (end, step)
+    };
+    let first = start.saturating_add(1); // 1-based; saturates for parity with translate_unbounded
+    if step > 1 {
+        // GNU sed has no clean bounded `~` form, so every dialect uses awk.
+        return Ok((
+            awk_stepped(first, step, Some(end)),
+            "posix",
+            Some(AWK_NEWLINE_NOTE),
+        ));
+    }
+    match mode {
+        TranslateMode::Lines => match dialect {
+            Dialect::Awk => {
+                let cond = if first == 1 {
+                    format!("NR<={end}")
+                } else {
+                    format!("NR>={first} && NR<={end}")
+                };
+                Ok((format!("awk '{cond}'"), "posix", Some(AWK_NEWLINE_NOTE)))
+            }
+            _ if start == 0 => Ok((format!("head -n {end}"), "posix", None)),
+            _ if end == first => Ok((format!("sed -n '{first}p'"), "posix", None)),
+            _ => Ok((format!("sed -n '{first},{end}p'"), "posix", None)),
+        },
+        TranslateMode::Bytes => {
+            let count = end - start;
+            match dialect {
+                Dialect::Awk => Err(AWK_BYTE_REASON),
+                Dialect::Bsd | Dialect::Gnu if start == 0 => {
+                    Ok((format!("head -c {end}"), "bsd", Some(HEAD_C_NOTE)))
+                }
+                _ if start == 0 => {
+                    Ok((format!("dd bs=1 count={count} 2>/dev/null"), "posix", None))
+                }
+                _ => Ok((
+                    format!("dd bs=1 skip={start} count={count} 2>/dev/null"),
+                    "posix",
+                    None,
+                )),
+            }
+        }
+        TranslateMode::Custom => unreachable!(),
+    }
+}
+
+/// `start:-back` — head-relative start, tail-relative end ("drop the last
+/// `back`"). Only `start == 0 && step == 1` is statically expressible.
+fn translate_lag(
+    start: usize,
+    back: NonZeroUsize,
+    step: usize,
+    mode: TranslateMode,
+    dialect: Dialect,
+) -> Result<Cmd, &'static str> {
+    if mode == TranslateMode::Custom {
+        return Err(CUSTOM_REASON);
+    }
+    if start > 0 {
+        return Err(LAG_START_REASON);
+    }
+    if step > 1 {
+        return Err(LAG_STEP_REASON);
+    }
+    let back = back.get();
+    match mode {
+        TranslateMode::Lines => match dialect {
+            Dialect::Awk => Err(AWK_TAIL_REASON),
+            Dialect::Gnu => Ok((format!("head -n -{back}"), "gnu", None)),
+            // POSIX has a single-command form only for the last line.
+            _ if back == 1 => Ok(("sed '$d'".to_owned(), "posix", None)),
+            _ => Err(DROP_LAST_LINES_REASON),
+        },
+        TranslateMode::Bytes => match dialect {
+            Dialect::Awk => Err(AWK_BYTE_REASON),
+            Dialect::Gnu => Ok((format!("head -c -{back}"), "gnu", None)),
+            _ => Err(DROP_LAST_BYTES_REASON),
+        },
+        TranslateMode::Custom => unreachable!(),
+    }
+}
+
+/// `-back:…` — tail-relative start. Only `-back:` (unbounded) is statically
+/// expressible; any fixed or tail-relative end needs the input length. The
+/// statically-empty ends (`-back:0`, `-k:-m` with k<=m) are handled before this
+/// is reached.
+fn translate_tail(
+    back: NonZeroUsize,
+    end: Option<SliceIndex>,
+    step: usize,
+    mode: TranslateMode,
+    dialect: Dialect,
+) -> Result<Cmd, &'static str> {
+    if mode == TranslateMode::Custom {
+        return Err(CUSTOM_REASON);
+    }
+    if step > 1 {
+        return Err(TAIL_STEP_REASON);
+    }
+    if end.is_some() {
+        return Err(TAIL_BOUNDED_REASON);
+    }
+    let back = back.get();
+    match mode {
+        TranslateMode::Lines => match dialect {
+            Dialect::Awk => Err(AWK_TAIL_REASON),
+            _ => Ok((format!("tail -n {back}"), "posix", None)),
+        },
+        TranslateMode::Bytes => match dialect {
+            Dialect::Awk => Err(AWK_BYTE_REASON),
+            _ => Ok((format!("tail -c {back}"), "posix", None)),
+        },
+        TranslateMode::Custom => unreachable!(),
+    }
 }
 
 /// "1st", "2nd", "3rd", "4th" ...
@@ -1190,6 +1538,207 @@ mod tests {
             let text = SliceRange::from_str("-5:0").unwrap().explain("line");
             assert!(text.contains("1-based: empty (start length-5 is at or past end 0)"));
             assert!(text.contains("count: 0"));
+        }
+    }
+
+    mod translate {
+        use super::*;
+        use TranslateDialect::{All, Awk, Bsd, Gnu, Posix};
+        use TranslateMode::{Bytes, Custom, Lines};
+
+        fn tr(range: &str, mode: TranslateMode, dialect: TranslateDialect) -> String {
+            SliceRange::from_str(range)
+                .unwrap()
+                .translate(mode, dialect)
+        }
+
+        #[test]
+        fn whole_input_is_cat() {
+            assert_eq!(tr(":", Lines, Posix), "cat\n# tier: posix\n");
+            assert_eq!(tr("0::1", Bytes, Posix), "cat\n# tier: posix\n");
+        }
+
+        #[test]
+        fn empty_range_reports_nothing() {
+            assert_eq!(
+                tr("5:3", Lines, Posix),
+                "# the range selects nothing (empty)\n"
+            );
+            // `:-0` normalizes to a FromStart(0) end, i.e. `:0`, which is empty.
+            assert_eq!(
+                tr(":-0", Lines, Posix),
+                "# the range selects nothing (empty)\n"
+            );
+        }
+
+        #[test]
+        fn head_and_tail_lines() {
+            assert_eq!(tr(":5", Lines, Posix), "head -n 5\n# tier: posix\n");
+            assert_eq!(tr("-5:", Lines, Posix), "tail -n 5\n# tier: posix\n");
+            assert_eq!(tr("9:", Lines, Posix), "tail -n +10\n# tier: posix\n");
+        }
+
+        #[test]
+        fn window_lines_use_sed() {
+            assert_eq!(tr("1:5", Lines, Posix), "sed -n '2,5p'\n# tier: posix\n");
+            assert_eq!(tr("6:7", Lines, Posix), "sed -n '7p'\n# tier: posix\n");
+        }
+
+        #[test]
+        fn drop_last_lines_tiers() {
+            // The last line has a POSIX single-command form; more do not.
+            assert_eq!(tr(":-1", Lines, Posix), "sed '$d'\n# tier: posix\n");
+            assert_eq!(tr(":-1", Lines, Gnu), "head -n -1\n# tier: gnu\n");
+            assert_eq!(tr(":-5", Lines, Gnu), "head -n -5\n# tier: gnu\n");
+            assert!(tr(":-5", Lines, Posix).starts_with("# no equivalent:"));
+            assert!(tr(":-5", Lines, Bsd).starts_with("# no equivalent:"));
+        }
+
+        #[test]
+        fn stepped_lines_posix_uses_awk_gnu_uses_sed() {
+            assert!(tr("::2", Lines, Posix).starts_with("awk 'NR%2==1'\n# tier: posix"));
+            assert_eq!(tr("::2", Lines, Gnu), "sed -n '1~2p'\n# tier: gnu\n");
+            assert_eq!(tr("1::2", Lines, Gnu), "sed -n '2~2p'\n# tier: gnu\n");
+            assert!(
+                tr("3::2", Lines, Posix).starts_with("awk 'NR>=4 && (NR-4)%2==0'\n# tier: posix")
+            );
+            // Bounded stepped: every dialect uses awk (no clean bounded GNU sed).
+            assert!(tr("1:7:2", Lines, Gnu).starts_with("awk 'NR>=2 && (NR-2)%2==0 && NR<=7'"));
+        }
+
+        #[test]
+        fn awk_view_lines() {
+            assert!(tr(":5", Lines, Awk).starts_with("awk 'NR<=5'\n# tier: posix"));
+            assert!(tr("1:5", Lines, Awk).starts_with("awk 'NR>=2 && NR<=5'\n# tier: posix"));
+            assert!(tr("1:", Lines, Awk).starts_with("awk 'NR>=2'\n# tier: posix"));
+            // Every awk form carries the divergence caveat, the unbounded one included.
+            assert!(tr("1:", Lines, Awk).contains("re-terminates"));
+            // awk cannot select relative to the end without buffering.
+            assert!(tr("-5:", Lines, Awk).starts_with("# no equivalent:"));
+            assert!(tr(":-1", Lines, Awk).starts_with("# no equivalent:"));
+        }
+
+        #[test]
+        fn max_start_saturates_instead_of_overflowing() {
+            // `start` can be usize::MAX; a plain `+ 1` would overflow-panic in
+            // debug. Mirrors the explain test `max_start_saturates_first_position`.
+            let max = usize::MAX.to_string();
+            assert_eq!(
+                tr(&format!("{max}:"), Lines, Posix),
+                format!("tail -n +{max}\n# tier: posix\n")
+            );
+            assert_eq!(
+                tr(&format!("{max}:"), Bytes, Posix),
+                format!("tail -c +{max}\n# tier: posix\n")
+            );
+        }
+
+        #[test]
+        fn byte_head_dialects() {
+            assert_eq!(
+                tr(":5", Bytes, Posix),
+                "dd bs=1 count=5 2>/dev/null\n# tier: posix\n"
+            );
+            assert!(tr(":5", Bytes, Bsd).starts_with("head -c 5\n# tier: bsd"));
+            assert!(tr(":5", Bytes, Gnu).starts_with("head -c 5\n# tier: bsd"));
+        }
+
+        #[test]
+        fn byte_window_and_tail() {
+            assert_eq!(
+                tr("5:15", Bytes, Posix),
+                "dd bs=1 skip=5 count=10 2>/dev/null\n# tier: posix\n"
+            );
+            assert_eq!(tr("-5:", Bytes, Posix), "tail -c 5\n# tier: posix\n");
+            assert_eq!(tr("5:", Bytes, Posix), "tail -c +6\n# tier: posix\n");
+        }
+
+        #[test]
+        fn byte_drop_last_only_gnu() {
+            assert_eq!(tr(":-5", Bytes, Gnu), "head -c -5\n# tier: gnu\n");
+            assert_eq!(tr(":-1", Bytes, Gnu), "head -c -1\n# tier: gnu\n");
+            assert!(tr(":-5", Bytes, Posix).starts_with("# no equivalent:"));
+        }
+
+        #[test]
+        fn degenerate_stepped_byte_collapses_to_one_byte_window() {
+            // A bounded byte step that never reaches a second selected byte picks
+            // the single byte at `start`, identical to the unstepped one-byte
+            // window, so it shares the dd/head -c translation.
+            assert_eq!(
+                tr("5:6:2", Bytes, Posix),
+                "dd bs=1 skip=5 count=1 2>/dev/null\n# tier: posix\n"
+            );
+            // end - start == step still selects only `start` (byte 5 for 5:7:2).
+            assert_eq!(
+                tr("5:7:2", Bytes, Posix),
+                "dd bs=1 skip=5 count=1 2>/dev/null\n# tier: posix\n"
+            );
+            // start == 0 reuses the head -c / dd-from-start spellings.
+            assert_eq!(
+                tr(":1:2", Bytes, Posix),
+                "dd bs=1 count=1 2>/dev/null\n# tier: posix\n"
+            );
+            assert!(tr(":1:2", Bytes, Bsd).starts_with("head -c 1\n# tier: bsd"));
+            // A step that does reach a second byte stays a genuine, untranslatable
+            // stride.
+            assert!(tr("5:8:2", Bytes, Posix).starts_with("# no equivalent:"));
+            assert!(tr(":3:2", Bytes, Posix).starts_with("# no equivalent:"));
+        }
+
+        #[test]
+        fn untranslatable_cases() {
+            // custom delimiter / NUL records
+            assert!(tr(":5", Custom, Posix).starts_with("# no equivalent:"));
+            // head-relative start, tail-relative end: needs length
+            assert!(tr("3:-2", Lines, Posix).starts_with("# no equivalent:"));
+            // tail-relative start with a fixed end: needs length
+            assert!(tr("-5:3", Lines, Posix).starts_with("# no equivalent:"));
+            // tail start combined with a step
+            assert!(tr("-5::2", Lines, Posix).starts_with("# no equivalent:"));
+            // strided bytes
+            assert!(tr("::2", Bytes, Posix).starts_with("# no equivalent:"));
+            // awk has no byte equivalent
+            assert!(tr("5:15", Bytes, Awk).starts_with("# no equivalent:"));
+        }
+
+        #[test]
+        fn relative_end_collapses_to_window() {
+            assert_eq!(tr("5:+10", Lines, Posix), "sed -n '6,15p'\n# tier: posix\n");
+            assert_eq!(
+                tr("100:+-10", Lines, Posix),
+                "sed -n '91,110p'\n# tier: posix\n"
+            );
+        }
+
+        #[test]
+        fn all_lists_every_dialect_including_duplicates() {
+            assert_eq!(
+                tr("::2", Lines, All),
+                "# posix: awk 'NR%2==1'\n# bsd:   awk 'NR%2==1'\n# gnu:   sed -n '1~2p'\n# awk:   awk 'NR%2==1'\n"
+            );
+            // partial: only gnu has an equivalent
+            assert_eq!(
+                tr(":-5", Lines, All),
+                "# posix: (no equivalent)\n# bsd:   (no equivalent)\n# gnu:   head -n -5\n# awk:   (no equivalent)\n"
+            );
+        }
+
+        #[test]
+        fn every_output_ends_with_newline() {
+            for (range, mode, dialect) in [
+                (":", Lines, Posix),
+                (":5", Bytes, Bsd),
+                ("::2", Lines, All),
+                (":-5", Lines, Posix),
+                ("5:15", Bytes, Awk),
+                ("5:3", Lines, Gnu),
+            ] {
+                assert!(
+                    tr(range, mode, dialect).ends_with('\n'),
+                    "{range} {mode:?} {dialect:?}"
+                );
+            }
         }
     }
 

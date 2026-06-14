@@ -24,6 +24,8 @@ Options:
           Interpret backslash escapes in --delimiter (/t /n /r /0 // /xHH)
       --explain
           Explain what the range selects and exit without reading input. Any FILES are ignored
+      --translate[=<DIALECT>]
+          Print the equivalent shell command for the range and mode, then exit without reading input. With no value the build target's native dialect is used. Any FILES are ignored [possible values: posix, bsd, gnu, awk, all]
       --generate <KIND>
           Generate the shell completion script or man page and exit without reading input [possible values: complete-bash, complete-zsh, complete-fish, complete-powershell, man]
   -q
