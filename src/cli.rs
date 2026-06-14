@@ -39,6 +39,11 @@ impl FromStr for NonZeroByteSize {
     author,
     arg_required_else_help = true,
     group(ArgGroup::new("mode").args(["lines", "bytes", "delimiter", "null"])),
+    // --explain and --translate are both read-and-exit actions handled in
+    // precedence order by entry(); group them so clap rejects both at once
+    // rather than silently running one. (--generate is `exclusive`, so it
+    // already conflicts with everything.)
+    group(ArgGroup::new("action").args(["explain", "translate"])),
 )]
 pub(crate) struct Args {
     // `allow_hyphen_values` is required so tail-relative ranges (`-5:`)
@@ -324,6 +329,13 @@ mod tests {
     fn delimiter_passthrough() {
         let args = Args::parse_from(["slice", "--delimiter", ",", "0:"]);
         assert_eq!(args.delimiter().unwrap(), Some(b",".to_vec()));
+    }
+
+    #[test]
+    fn explain_and_translate_conflict() {
+        let err = Args::try_parse_from(["slice", "--explain", "--translate=posix", "1:5"])
+            .expect_err("--explain and --translate are mutually exclusive");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
