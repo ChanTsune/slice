@@ -1,0 +1,5 @@
+error: the argument '--explain' cannot be used with '--translate[=<DIALECT>]'
+
+Usage: slice[EXE] --explain <RANGE> [FILES]...
+
+For more information, try '--help'.

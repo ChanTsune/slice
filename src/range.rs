@@ -243,28 +243,33 @@ impl SliceRange {
     /// `mode`, without reading any input. Mirrors [`Self::explain`]: the same
     /// four `(start, end)` arms, classified once into a candidate per dialect.
     pub(crate) fn translate(&self, mode: TranslateMode, dialect: TranslateDialect) -> String {
-        // Universal cases, independent of dialect and element kind.
-        match self.plan() {
-            Plan::Resolved(SlicePlan::Empty) => {
-                return "# the range selects nothing (empty)\n".to_owned();
-            }
-            // Whole input, byte-for-byte, in every mode.
-            Plan::Resolved(SlicePlan::Copy) => return render_single("cat", "posix", None),
-            _ => {}
+        let plan = self.plan();
+        // The empty range selects nothing in every mode and dialect — there is
+        // nothing to translate, so one line stands for `all` as well.
+        if matches!(plan, Plan::Resolved(SlicePlan::Empty)) {
+            return "# the range selects nothing (empty)\n".to_owned();
         }
+        // Whole input is `cat` in every dialect.
+        let copy = matches!(plan, Plan::Resolved(SlicePlan::Copy));
         let step = self.step.map_or(1, NonZeroUsize::get);
         match dialect {
             TranslateDialect::All => {
                 let mut out = String::new();
                 for d in [Dialect::Posix, Dialect::Bsd, Dialect::Gnu, Dialect::Awk] {
                     let label = format!("{}:", dialect_label(d));
-                    match self.candidate(mode, step, d) {
-                        Ok((cmd, _, _)) => out.push_str(&format!("# {label:<7}{cmd}\n")),
-                        Err(_) => out.push_str(&format!("# {label:<7}(no equivalent)\n")),
+                    let row = if copy {
+                        Some("cat".to_owned())
+                    } else {
+                        self.candidate(mode, step, d).ok().map(|(cmd, _, _)| cmd)
+                    };
+                    match row {
+                        Some(cmd) => out.push_str(&format!("# {label:<7}{cmd}\n")),
+                        None => out.push_str(&format!("# {label:<7}(no equivalent)\n")),
                     }
                 }
                 out
             }
+            _ if copy => render_single("cat", "posix", None),
             TranslateDialect::Posix => self.render(mode, step, Dialect::Posix),
             TranslateDialect::Bsd => self.render(mode, step, Dialect::Bsd),
             TranslateDialect::Gnu => self.render(mode, step, Dialect::Gnu),
@@ -1721,6 +1726,18 @@ mod tests {
             assert_eq!(
                 tr(":-5", Lines, All),
                 "# posix: (no equivalent)\n# bsd:   (no equivalent)\n# gnu:   head -n -5\n# awk:   (no equivalent)\n"
+            );
+        }
+
+        #[test]
+        fn all_lists_copy_per_dialect_but_empty_stays_one_line() {
+            let cat_block = "# posix: cat\n# bsd:   cat\n# gnu:   cat\n# awk:   cat\n";
+            assert_eq!(tr(":", Lines, All), cat_block);
+            assert_eq!(tr("0::1", Bytes, All), cat_block);
+            // The empty range is not a translation; one line stands for `all`.
+            assert_eq!(
+                tr("5:3", Lines, All),
+                "# the range selects nothing (empty)\n"
             );
         }
 

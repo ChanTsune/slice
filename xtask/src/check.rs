@@ -519,7 +519,7 @@ fn check_translate_parity(slice_bin: &PathBuf) -> Result<(), String> {
                 };
                 if &got != oracle {
                     return Err(format!(
-                        "translate parity mismatch [{} {range} {dialect} / {label}]\n  cmd:   {cmd}\n  slice: {oracle:?}\n  cmd:   {got:?}",
+                        "translate parity mismatch [{} {range} {dialect} / {label}]\n  cmd:   {cmd}\n  slice: {oracle:?}\n  got:   {got:?}",
                         mode.label()
                     ));
                 }
