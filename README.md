@@ -109,7 +109,7 @@ This command slices the contents of `file.txt` from the beginning of the file to
 slice 5:+10 file.txt
 ```
 
-This command is the same as `slice` 5:15 file.txt`.
+This command is the same as `slice 5:15 file.txt`.
 
 ```sh
 slice -5: file.txt
@@ -175,9 +175,7 @@ everything).
 A tail-relative `start` (`-N:`) cannot emit anything until the input ends, and
 holds the last `N` elements in memory while it reads — the same shape as
 `tail`. A tail-relative `end` (`:-N`) stays streaming: each element is emitted
-as soon as `N` more have arrived, so only `N` elements are ever held. In byte
-mode on regular files both forms resolve against the file size up front and
-seek straight to the data, buffering nothing.
+as soon as `N` more have arrived, so only `N` elements are ever held.
 
 ```sh
 find . -type f -print0 | slice 0:100 -z
@@ -204,9 +202,8 @@ slice --help
 ## Translate to a portable command
 
 `slice --translate` prints the nearest equivalent `head`/`tail`/`sed`/`awk`/`dd`
-command for a range and mode, then exits without reading any input — the inverse
-of the [cheatsheet](https://chantsune.github.io/slice/). It is the answer to
-"I used `slice` here, but the box that runs this script doesn't have it":
+command for a range, then exits without reading input — the answer to "I used
+`slice` here, but the box that runs this script doesn't have it":
 
 ```sh
 $ slice --translate 1:5
@@ -218,34 +215,9 @@ dd bs=1 skip=5 count=10 2>/dev/null
 # tier: posix
 ```
 
-With no value, `--translate` uses the spelling native to the platform `slice`
-was built for. Pass an explicit dialect to choose another — `posix` (strictly
-portable), `bsd`, `gnu`, `awk`, or `all` (every dialect at once):
-
-```sh
-$ slice --translate=all ::2
-# posix: awk 'NR%2==1'
-# bsd:   awk 'NR%2==1'
-# gnu:   sed -n '1~2p'
-# awk:   awk 'NR%2==1'
-```
-
-The `# tier:` line states what each command actually requires, so a GNU-only
-spelling like `head -n -5` is never mistaken for portable. Ranges with no
-faithful single-command equivalent — custom or NUL delimiters, strided byte
-selections, or ranges that need the input length — report why instead of
-emitting a command that would do the wrong thing:
-
-```sh
-$ slice --translate -z -1:
-# no equivalent: no standard tool selects records by a custom delimiter
-# tier: slice-only
-```
-
-Unlike `slice`, which is byte-exact, the `awk` spellings are not binary-safe:
-`awk` re-terminates an unterminated final line and may drop bytes after an
-embedded NUL. The `# tier:` line flags this on the affected commands; the
-`head`/`tail`/`sed`/`dd` forms carry no such caveat.
+Pass an explicit dialect (`posix`/`bsd`/`gnu`/`awk`/`all`) or omit it for the
+platform's native toolset. Each line carries a portability `# tier:`, and ranges
+with no faithful single-command equivalent say so instead of misleading you.
 
 ## Shell completions and man page
 
