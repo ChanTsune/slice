@@ -1,4 +1,4 @@
-use crate::range::SliceRange;
+use crate::range::{SliceRange, TranslateDialect};
 use bytesize::ByteSize;
 use clap::{ArgGroup, Parser, ValueEnum};
 use std::{path::PathBuf, str::FromStr};
@@ -80,6 +80,43 @@ e.g., '50:+50'"
         help = "Explain what the range selects and exit without reading input. Any FILES are ignored"
     )]
     pub(crate) explain: bool,
+    // `require_equals` forces the `--translate=<DIALECT>` spelling so a bare
+    // `--translate` never swallows the following `<RANGE>` as its value; the
+    // bare form then falls back to `default_missing_value`, set per build target
+    // via `cfg_attr` to the platform's native toolset.
+    #[arg(
+        long,
+        value_name = "DIALECT",
+        num_args = 0..=1,
+        require_equals = true,
+        help = "Print the equivalent shell command for the range and mode, then exit without reading input. With no value the build target's native dialect is used. Any FILES are ignored"
+    )]
+    #[cfg_attr(
+        all(target_os = "linux", target_env = "gnu"),
+        arg(default_missing_value = "gnu")
+    )]
+    #[cfg_attr(
+        any(
+            target_os = "macos",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        ),
+        arg(default_missing_value = "bsd")
+    )]
+    #[cfg_attr(
+        not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        )),
+        arg(default_missing_value = "posix")
+    )]
+    pub(crate) translate: Option<TranslateDialect>,
     #[arg(
         long,
         value_name = "KIND",
@@ -372,6 +409,7 @@ mod tests {
         assert!(Args::try_parse_from(["slice", "--generate", "complete-bash", "1:2"]).is_err());
         assert!(Args::try_parse_from(["slice", "--generate", "man", "-l"]).is_err());
         assert!(Args::try_parse_from(["slice", "--generate", "man", "--explain"]).is_err());
+        assert!(Args::try_parse_from(["slice", "--generate", "man", "--translate=posix"]).is_err());
         assert!(Args::try_parse_from(["slice", "--generate", "man", "file.txt"]).is_err());
     }
 
@@ -379,5 +417,69 @@ mod tests {
     fn range_still_required_without_generate() {
         assert!(Args::try_parse_from(["slice"]).is_err());
         assert!(Args::try_parse_from(["slice", "-l"]).is_err());
+    }
+
+    #[test]
+    fn translate_explicit_dialect_parses() {
+        let args = Args::parse_from(["slice", "--translate=posix", ":5"]);
+        assert_eq!(args.translate, Some(TranslateDialect::Posix));
+        let args = Args::parse_from(["slice", "--translate=all", "1:5"]);
+        assert_eq!(args.translate, Some(TranslateDialect::All));
+    }
+
+    #[test]
+    fn translate_absent_is_none() {
+        let args = Args::parse_from(["slice", ":5"]);
+        assert_eq!(args.translate, None);
+    }
+
+    #[test]
+    fn translate_bare_uses_platform_default() {
+        let args = Args::parse_from(["slice", "--translate", ":5"]);
+        let expected = if cfg!(all(target_os = "linux", target_env = "gnu")) {
+            TranslateDialect::Gnu
+        } else if cfg!(any(
+            target_os = "macos",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly"
+        )) {
+            TranslateDialect::Bsd
+        } else {
+            TranslateDialect::Posix
+        };
+        assert_eq!(args.translate, Some(expected));
+    }
+
+    #[test]
+    fn translate_require_equals_keeps_range_separate() {
+        // A space-separated argument is not consumed as the dialect value, so
+        // the range still reaches <RANGE> — including a hyphen-led tail range.
+        let args = Args::parse_from(["slice", "--translate", "5:10"]);
+        assert!(args.translate.is_some());
+        assert_eq!(
+            args.range,
+            Some(SliceRange {
+                start: SliceIndex::FromStart(5),
+                end: Some(SliceIndex::FromStart(10)),
+                step: None,
+            })
+        );
+        let args = Args::parse_from(["slice", "--translate", "-5:"]);
+        assert!(args.translate.is_some());
+        assert_eq!(
+            args.range,
+            Some(SliceRange {
+                start: SliceIndex::FromEnd(NonZeroUsize::new(5).unwrap()),
+                end: None,
+                step: None,
+            })
+        );
+    }
+
+    #[test]
+    fn translate_rejects_unknown_dialect() {
+        assert!(Args::try_parse_from(["slice", "--translate=swahili", ":5"]).is_err());
     }
 }

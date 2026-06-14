@@ -1,0 +1,4 @@
+# posix: awk 'NR%2==1'
+# bsd:   awk 'NR%2==1'
+# gnu:   sed -n '1~2p'
+# awk:   awk 'NR%2==1'
