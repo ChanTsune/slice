@@ -729,8 +729,8 @@ mod tests {
         use super::*;
         use crate::range::TranslateMode;
 
-        // The translate taxonomy must mirror slice_mode; the empty delimiter is
-        // the case that previously diverged (classified Custom instead of Bytes).
+        // The translate taxonomy must mirror slice_mode: an empty delimiter
+        // classifies as Bytes, not Custom.
         #[test]
         fn mirrors_slice_mode_including_empty_delimiter() {
             assert_eq!(
