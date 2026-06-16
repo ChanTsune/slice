@@ -1,0 +1,6 @@
+start: 5
+end:   1 (exclusive)
+step:  -1 (reverse)
+0-based: lines at indices 5 down to 2 (end 1 exclusive), clamped to the input length
+1-based: from the 6th line to the 3rd line
+count: at most 4

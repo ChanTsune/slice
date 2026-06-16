@@ -611,19 +611,24 @@ fn oracle_run(
 /// The realized portability tier of a translate command, derived from its shape.
 /// This must track every GNU-only spelling `src/range.rs` emits: the drop-last
 /// forms `head -n -N`/`head -c -N` (`translate_lag`), the `sed -n 'F~Sp'` stride
-/// (`translate_unbounded`), and the zero-count empty range `head -n 0`/`head -c 0`
-/// (`empty_candidate`) — POSIX/BSD `head` reject a count of 0. `head -c N` is
-/// BSD+; everything else (`sed -n` ranges, `sed '$d'`, `head -n N`, `tail`, `dd`,
-/// `cat`) is POSIX.
+/// (`translate_unbounded`), the zero-count empty range `head -n 0`/`head -c 0`
+/// (`empty_candidate`) — POSIX/BSD `head` reject a count of 0 — and the line
+/// reverse `tac` (`translate_reverse`). `head -c N` is BSD+ (present on BSD
+/// and GNU); `tail -r` is BSD-only — GNU tail has no `-r` (GNU spells it
+/// `tac`) — and the parity loop only forgives run failures in the gnu bucket,
+/// so a reverse case cannot join `TRANSLATE_CASES` without a skip rule for
+/// `tail -r`. Everything else (`sed -n` ranges, `sed '$d'`, `head -n N`,
+/// `tail`, `dd`, `cat`) is POSIX.
 fn classify_tier(cmd: &str) -> &'static str {
     if cmd.starts_with("head -n -")
         || cmd.starts_with("head -c -")
         || cmd == "head -n 0"
         || cmd == "head -c 0"
+        || cmd == "tac"
         || cmd.contains('~')
     {
         "gnu"
-    } else if cmd.starts_with("head -c ") {
+    } else if cmd.starts_with("head -c ") || cmd == "tail -r" {
         "bsd"
     } else {
         "posix"

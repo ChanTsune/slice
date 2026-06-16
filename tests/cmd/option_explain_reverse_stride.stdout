@@ -1,0 +1,6 @@
+start: last line
+end:   start of input
+step:  -2 (reverse)
+0-based: lines at indices [0, length) in reverse order, every 2 starting at the last
+1-based: every 2nd line from the last line to the first line
+count: until end of input (reverse, step 2)

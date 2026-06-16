@@ -1,0 +1,6 @@
+start: 3 from the end
+end:   3 from the end (exclusive)
+step:  -1 (reverse)
+0-based: none (start 3 from the end is at or below end 3 from the end for a reverse step)
+1-based: empty
+count: 0

@@ -118,6 +118,7 @@ If `<file>` is not specified, `slice` will read from standard input.
 The slice syntax is similar to Python's slice syntax, with the format `start:end:step`.
 Each value is optional and, if omitted, defaults to the beginning of the file, the end of the file, and a step of 1, respectively.
 Negative `start` and `end` values count back from the end of the input, exactly like Python: `-N` means `length - N`, and out-of-range values clamp to the input instead of erroring.
+A negative `step` selects in reverse — `slice ::-1 file.txt` reverses the file like `tac` — and buffers the whole input in memory.
 
 ## Examples
 

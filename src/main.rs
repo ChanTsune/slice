@@ -6,10 +6,10 @@ mod range;
 
 use crate::{
     ext::{
-        slice_lag, slice_lag_with_record_limit, slice_stepped, slice_tail,
-        slice_tail_with_record_limit, slice_window, Byte, Bytes,
+        read_all_with_record_limit, slice_lag, slice_lag_with_record_limit, slice_stepped,
+        slice_tail, slice_tail_with_record_limit, slice_window, Byte, Bytes,
     },
-    range::{DeferredPlan, Plan, SliceIndex, SlicePlan, SliceRange},
+    range::{DeferredPlan, Plan, ReversePlan, SliceIndex, SlicePlan, SliceRange},
 };
 use clap::{CommandFactory, Parser};
 use std::{
@@ -591,6 +591,93 @@ fn apply_deferred<R: BufRead, W: Write>(
     }
 }
 
+/// The reverse plan buffers the whole input: the first element out is in
+/// general the last element in, so unlike Tail's bounded ring no fixed-size
+/// window suffices. `--max-record-size` still bounds each record, enforced
+/// while reading so an oversized record fails after at most the limit's
+/// bytes of it, not after the input was swallowed whole.
+fn apply_reverse<R: BufRead, W: Write>(
+    mode: &SliceMode,
+    mut input: R,
+    mut output: W,
+    plan: ReversePlan,
+    max_record_size: Option<usize>,
+) -> io::Result<()> {
+    // The record limit is a line/delimiter concept: byte mode ignores it,
+    // like the tail-relative byte paths.
+    let data = match (mode, max_record_size) {
+        (SliceMode::Lines, Some(_)) => {
+            read_all_with_record_limit(Byte(b'\n'), input, max_record_size)?
+        }
+        (SliceMode::Custom(&[b]), Some(_)) => {
+            read_all_with_record_limit(Byte(b), input, max_record_size)?
+        }
+        (SliceMode::Custom(delimiter), Some(_)) => {
+            read_all_with_record_limit(Bytes::new(delimiter), input, max_record_size)?
+        }
+        _ => {
+            let mut data = Vec::new();
+            input.read_to_end(&mut data)?;
+            data
+        }
+    };
+    match mode {
+        SliceMode::Bytes => reverse_bytes(&data, &mut output, plan)?,
+        SliceMode::Lines => reverse_chunks(&data, &mut output, b"\n", plan)?,
+        SliceMode::Custom(delimiter) => reverse_chunks(&data, &mut output, delimiter, plan)?,
+    }
+    output.flush()
+}
+
+fn reverse_bytes<W: Write>(data: &[u8], output: &mut W, plan: ReversePlan) -> io::Result<()> {
+    let mut buf = Vec::with_capacity(WRITE_BUF_SIZE);
+    for i in plan.indices(data.len()) {
+        buf.push(data[i]);
+        if buf.len() == WRITE_BUF_SIZE {
+            output.write_all(&buf)?;
+            buf.clear();
+        }
+    }
+    output.write_all(&buf)
+}
+
+/// Emit the selected chunks in descending order under the terminator model:
+/// every element is written delimiter-terminated, except that when the
+/// input's unterminated final chunk is selected (it is then the first out),
+/// its missing delimiter floats to the end of the output.
+fn reverse_chunks<W: Write>(
+    data: &[u8],
+    output: &mut W,
+    delimiter: &[u8],
+    plan: ReversePlan,
+) -> io::Result<()> {
+    debug_assert!(!delimiter.is_empty(), "empty delimiter is byte mode");
+    let finder = memchr::memmem::Finder::new(delimiter);
+    // Content spans, delimiters excluded; only the final chunk can lack one.
+    let mut chunks = Vec::new();
+    let mut pos = 0;
+    while let Some(hit) = finder.find(&data[pos..]) {
+        chunks.push((pos, pos + hit));
+        pos += hit + delimiter.len();
+    }
+    let unterminated = pos < data.len();
+    if unterminated {
+        chunks.push((pos, data.len()));
+    }
+    let mut selected = plan.indices(chunks.len()).peekable();
+    // indices() clamps the walk's origin to the last index, so the walk can
+    // include the last chunk only as its first element.
+    let all_terminated = !(unterminated && selected.peek() == Some(&(chunks.len() - 1)));
+    while let Some(i) = selected.next() {
+        let (start, end) = chunks[i];
+        output.write_all(&data[start..end])?;
+        if selected.peek().is_some() || all_terminated {
+            output.write_all(delimiter)?;
+        }
+    }
+    Ok(())
+}
+
 fn report_error(path: &Path, err: &io::Error) {
     eprintln!("slice: {}: {}", path.display(), err);
 }
@@ -706,6 +793,7 @@ fn entry(args: cli::Args) -> bool {
             Plan::Deferred(deferred) => {
                 apply_deferred(&mode, input, output, deferred, max_record_size)
             }
+            Plan::Reverse(reverse) => apply_reverse(&mode, input, output, reverse, max_record_size),
         };
         stdout_status(result)
     } else {
@@ -734,6 +822,9 @@ fn entry(args: cli::Args) -> bool {
                             None => apply_deferred(&mode, input, output, deferred, max_record_size),
                         }
                     }
+                    Plan::Reverse(reverse) => {
+                        apply_reverse(&mode, input, output, reverse, max_record_size)
+                    }
                 }
             },
         )
@@ -751,6 +842,7 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::range::Step;
     use std::str::FromStr;
 
     // The driver helpers below take absolute offsets; tail-relative bounds
@@ -770,12 +862,19 @@ mod tests {
     fn resolved_plan_of(range: &SliceRange) -> SlicePlan {
         match range.plan() {
             Plan::Resolved(plan) => plan,
-            Plan::Deferred(_) => panic!("expected a statically resolved plan"),
+            other => panic!("expected a statically resolved plan, planned {other:?}"),
         }
     }
 
     fn resolved_plan(range: &str) -> SlicePlan {
         resolved_plan_of(&SliceRange::from_str(range).unwrap())
+    }
+
+    fn reverse_plan(range: &str) -> ReversePlan {
+        match SliceRange::from_str(range).unwrap().plan() {
+            Plan::Reverse(reverse) => reverse,
+            other => panic!("{range} must classify as reverse, planned {other:?}"),
+        }
     }
 
     mod translate_classification {
@@ -818,7 +917,7 @@ mod tests {
                 &mut out,
                 start,
                 end,
-                range.step.unwrap_or(NonZeroUsize::MIN),
+                range.step.magnitude(),
             )
             .expect("");
             out
@@ -1157,7 +1256,7 @@ mod tests {
                 BrokenPipeWriter,
                 start,
                 end,
-                range.step.unwrap(),
+                range.step.magnitude(),
             )
             .expect_err("a broken pipe must propagate from slice_stepped");
             fs::remove_file(&file).ok();
@@ -1189,6 +1288,23 @@ mod tests {
             )
             .expect_err("a broken pipe must propagate from byte_lag");
             assert!(is_broken_pipe(&err));
+        }
+
+        // Reverse emission happens at EOF, after the input was read in full;
+        // the failure must still surface from the write loop.
+        #[test]
+        fn reverse_emission_propagates_broken_pipe() {
+            for mode in [SliceMode::Lines, SliceMode::Bytes, SliceMode::Custom(b",")] {
+                let err = apply_reverse(
+                    &mode,
+                    &b"a,b\nc,d\n"[..],
+                    BrokenPipeWriter,
+                    reverse_plan("::-1"),
+                    None,
+                )
+                .expect_err("a broken pipe must propagate from apply_reverse");
+                assert!(is_broken_pipe(&err));
+            }
         }
 
         // Tail emission happens at EOF, after the input was read in full; the
@@ -1228,14 +1344,7 @@ mod tests {
             let range = SliceRange::from_str(range).unwrap();
             let (start, end) = bounds(&range);
             let mut out = Vec::new();
-            byte_mode(
-                input,
-                &mut out,
-                start,
-                end,
-                range.step.unwrap_or(NonZeroUsize::MIN),
-            )
-            .expect("");
+            byte_mode(input, &mut out, start, end, range.step.magnitude()).expect("");
             out
         }
 
@@ -1477,7 +1586,7 @@ mod tests {
         fn deferred(range: &str) -> DeferredPlan {
             match SliceRange::from_str(range).unwrap().plan() {
                 Plan::Deferred(deferred) => deferred,
-                Plan::Resolved(plan) => panic!("{range} must defer, resolved to {plan:?}"),
+                other => panic!("{range} must defer, planned {other:?}"),
             }
         }
 
@@ -1948,7 +2057,7 @@ mod tests {
                     delimiter,
                     start,
                     end,
-                    range.step.unwrap_or(NonZeroUsize::MIN),
+                    range.step.magnitude(),
                 )
                 .expect("");
                 assert_eq!(
@@ -1962,6 +2071,55 @@ mod tests {
         }
     }
 
+    mod reverse {
+        use super::*;
+
+        // Crosses the WRITE_BUF_SIZE batching boundary: a flush/clear bug in
+        // reverse_bytes shows up only past the buffer size.
+        #[test]
+        fn bytes_batching_survives_buffer_boundary() {
+            let data: Vec<u8> = (0..3 * WRITE_BUF_SIZE + 17)
+                .map(|i| (i % 251) as u8)
+                .collect();
+            let mut out = Vec::new();
+            reverse_bytes(&data, &mut out, reverse_plan("::-1")).expect("");
+            assert_eq!(out, data.iter().rev().copied().collect::<Vec<u8>>());
+
+            let mut out = Vec::new();
+            reverse_bytes(&data, &mut out, reverse_plan("::-3")).expect("");
+            let expected: Vec<u8> = data.iter().rev().copied().step_by(3).collect();
+            assert_eq!(out, expected);
+        }
+
+        // The record limit aborts an oversized record during the read; byte
+        // mode ignores it like the tail-relative byte paths.
+        #[test]
+        fn record_limit_applies_to_lines_not_bytes() {
+            let input = b"toolong\nab\n";
+            let mut out = Vec::new();
+            let err = apply_reverse(
+                &SliceMode::Lines,
+                &input[..],
+                &mut out,
+                reverse_plan("::-1"),
+                Some(4),
+            )
+            .expect_err("an oversized record must fail the reverse read");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+            let mut out = Vec::new();
+            apply_reverse(
+                &SliceMode::Bytes,
+                &input[..],
+                &mut out,
+                reverse_plan("::-1"),
+                Some(4),
+            )
+            .expect("byte mode ignores the record limit");
+            assert_eq!(out, input.iter().rev().copied().collect::<Vec<u8>>());
+        }
+    }
+
     mod empty_delimiter {
         use super::*;
 
@@ -1972,7 +2130,8 @@ mod tests {
         fn routes_through_byte_machinery() {
             const INPUT: &[u8] = b"slice\xaabinary\nstream";
             for range in [
-                "::", "1:", ":3", "2:5", "::2", "1::3", "5:3", ":-2", "-3:", "-4:-1:2",
+                "::", "1:", ":3", "2:5", "::2", "1::3", "5:3", ":-2", "-3:", "-4:-1:2", "::-1",
+                "5:1:-2",
             ] {
                 let plan = SliceRange::from_str(range).unwrap().plan();
                 let apply_with = |mode: &SliceMode| {
@@ -1983,6 +2142,9 @@ mod tests {
                         }
                         Plan::Deferred(deferred) => {
                             apply_deferred(mode, INPUT, &mut out, deferred, None).expect("")
+                        }
+                        Plan::Reverse(reverse) => {
+                            apply_reverse(mode, INPUT, &mut out, reverse, None).expect("")
                         }
                     }
                     out
@@ -2072,7 +2234,7 @@ mod tests {
         fn tail_relative_start_reads_input() {
             let plan = match SliceRange::from_str("-1:").unwrap().plan() {
                 Plan::Deferred(deferred) => deferred,
-                Plan::Resolved(plan) => panic!("-1: must defer, got {plan:?}"),
+                other => panic!("-1: must defer, planned {other:?}"),
             };
             let mut out = Vec::new();
             apply_deferred(&SliceMode::Lines, NoReadReader, &mut out, plan, None)

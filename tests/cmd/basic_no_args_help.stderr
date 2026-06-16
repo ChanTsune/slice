@@ -6,7 +6,8 @@ Arguments:
   <RANGE>     The slice syntax is similar to Python's slice syntax, with the format `start:end:step`.
               Each value is optional and, if omitted, defaults to the start of the file, the end of the file, and a step of 1, respectively.
               Negative start/end values count back from the end of the input, like Python.
-              e.g., '50:100', '50:100:1', '-5:'
+              A negative step selects in reverse, like Python ('::-1' reverses the input); it buffers the whole input in memory.
+              e.g., '50:100', '50:100:1', '-5:', '::-1'
               and the extended syntax 'start:+line' is supported. (experimental)
               e.g., '50:+50'
   [FILES]...  Target files. if not provided use stdin
@@ -33,7 +34,7 @@ Options:
       --io-buffer-size <IO_BUFFER_SIZE>
           Set the size of the I/O buffer. This buffer is used for both input and output operations (experimental)
       --max-record-size <SIZE|unlimited>
-          Maximum bytes retained for one line/custom-delimited record in tail-relative ranges. Defaults to unlimited
+          Maximum bytes retained for one line/custom-delimited record in tail-relative and reverse ranges. Defaults to unlimited
   -h, --help
           Print help
   -V, --version

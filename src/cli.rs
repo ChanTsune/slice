@@ -83,7 +83,8 @@ pub(crate) struct Args {
         help = "The slice syntax is similar to Python's slice syntax, with the format `start:end:step`.
 Each value is optional and, if omitted, defaults to the start of the file, the end of the file, and a step of 1, respectively.
 Negative start/end values count back from the end of the input, like Python.
-e.g., '50:100', '50:100:1', '-5:'
+A negative step selects in reverse, like Python ('::-1' reverses the input); it buffers the whole input in memory.
+e.g., '50:100', '50:100:1', '-5:', '::-1'
 and the extended syntax 'start:+line' is supported. (experimental)
 e.g., '50:+50'"
     )]
@@ -166,7 +167,7 @@ e.g., '50:+50'"
     #[arg(
         long,
         value_name = "SIZE|unlimited",
-        help = "Maximum bytes retained for one line/custom-delimited record in tail-relative ranges. Defaults to unlimited"
+        help = "Maximum bytes retained for one line/custom-delimited record in tail-relative and reverse ranges. Defaults to unlimited"
     )]
     pub(crate) max_record_size: Option<MaxRecordSize>,
     #[arg(help = "Target files. if not provided use stdin")]
@@ -249,7 +250,7 @@ fn unescape(s: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::range::SliceIndex;
+    use crate::range::{SliceIndex, Step};
     use std::num::NonZeroUsize;
 
     #[test]
@@ -261,7 +262,7 @@ mod tests {
             Some(SliceRange {
                 start: SliceIndex::FromStart(0),
                 end: None,
-                step: NonZeroUsize::new(1),
+                step: Step::forward(1),
             })
         );
         assert_eq!(args.files, vec![PathBuf::from("text.txt")]);
@@ -276,7 +277,7 @@ mod tests {
             Some(SliceRange {
                 start: SliceIndex::FromStart(0),
                 end: None,
-                step: NonZeroUsize::new(1),
+                step: Step::forward(1),
             })
         );
         assert_eq!(args.files, vec![PathBuf::from("text.txt")]);
@@ -299,7 +300,7 @@ mod tests {
         let tail = SliceRange {
             start: SliceIndex::FromEnd(NonZeroUsize::new(5).unwrap()),
             end: None,
-            step: None,
+            step: Step::forward(1),
         };
         let args = Args::parse_from(["slice", "-5:"]);
         assert_eq!(args.range, Some(tail.clone()));
@@ -328,7 +329,7 @@ mod tests {
             Some(SliceRange {
                 start: SliceIndex::FromStart(10),
                 end: Some(SliceIndex::FromStart(20)),
-                step: None,
+                step: Step::forward(1),
             })
         );
     }
@@ -532,7 +533,7 @@ mod tests {
             Some(SliceRange {
                 start: SliceIndex::FromStart(5),
                 end: Some(SliceIndex::FromStart(10)),
-                step: None,
+                step: Step::forward(1),
             })
         );
         let args = Args::parse_from(["slice", "--translate", "-5:"]);
@@ -542,7 +543,7 @@ mod tests {
             Some(SliceRange {
                 start: SliceIndex::FromEnd(NonZeroUsize::new(5).unwrap()),
                 end: None,
-                step: None,
+                step: Step::forward(1),
             })
         );
     }
