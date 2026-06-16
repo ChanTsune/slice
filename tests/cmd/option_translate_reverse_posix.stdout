@@ -1,0 +1,1 @@
+# no equivalent: no POSIX single command reverses line order; GNU has tac, BSD has tail -r

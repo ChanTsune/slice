@@ -1,0 +1,6 @@
+# posix  (no equivalent)
+# bsd
+tail -r
+# gnu
+tac
+# awk  (no equivalent)

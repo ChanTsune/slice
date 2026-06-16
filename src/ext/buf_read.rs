@@ -16,7 +16,7 @@ impl fmt::Display for RecordSizeLimitExceeded {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "record exceeds --max-record-size={} bytes in tail-relative line/custom delimiter mode; use --max-record-size=unlimited to allow larger records",
+            "record exceeds --max-record-size={} bytes in line/custom delimiter mode; use --max-record-size=unlimited to allow larger records",
             self.limit
         )
     }
@@ -434,6 +434,27 @@ pub(crate) fn slice_tail_with_record_limit<S: Split, R: BufRead, W: Write>(
         output.write_all(&ring[i % cap])?;
     }
     output.flush()
+}
+
+/// Read the whole stream into one buffer, splitting only to bound each
+/// record: the reverse plan retains every record, so an oversized one must
+/// fail during the read — after at most `max_record_size` buffered bytes of
+/// it — not after the input was swallowed whole.
+pub(crate) fn read_all_with_record_limit<S: Split, R: BufRead>(
+    split: S,
+    mut input: R,
+    max_record_size: Option<usize>,
+) -> io::Result<Vec<u8>> {
+    let mut data = Vec::new();
+    let mut scratch = Vec::new();
+    loop {
+        scratch.clear();
+        let mut limited = LimitedVec::new(&mut scratch, max_record_size);
+        if split.read_to(&mut input, &mut limited)? == 0 {
+            return Ok(data);
+        }
+        data.extend_from_slice(&scratch);
+    }
 }
 
 /// Tail-relative end (`start:-m`): chunk i is selected iff i < L - m, certain
@@ -1506,6 +1527,76 @@ mod tests {
             assert_tail_parity(BytesRef(b"||"), b"a||b||c||d||");
             assert_tail_parity(BytesRef(b"||"), b"a|||b|");
             assert_tail_parity(BytesRef(b"aaa"), b"aaaaaa");
+        }
+    }
+
+    mod read_all {
+        use super::*;
+        use std::cell::Cell;
+
+        #[test]
+        fn concatenates_all_records_verbatim() {
+            let input = b"sl\xaace\nbin\xff\nslice\xaa";
+            let data = read_all_with_record_limit(Byte(b'\n'), &input[..], None).unwrap();
+            assert_eq!(data, input);
+        }
+
+        #[test]
+        fn record_limit_allows_exact_size() {
+            let data =
+                read_all_with_record_limit(Byte(b'\n'), &b"abc\ndef\n"[..], Some(4)).unwrap();
+            assert_eq!(data, b"abc\ndef\n");
+        }
+
+        #[test]
+        fn record_limit_rejects_oversized_record_mid_stream() {
+            let err = read_all_with_record_limit(Byte(b'\n'), &b"ok\ntoolong\nx\n"[..], Some(4))
+                .expect_err("an oversized record must fail the read");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert!(err.to_string().contains("--max-record-size=4 bytes"));
+        }
+
+        #[test]
+        fn record_limit_rejects_oversized_unterminated_tail() {
+            let err = read_all_with_record_limit(Byte(b'\n'), &b"ok\ntoolong"[..], Some(4))
+                .expect_err("the delimiter-less tail is still one record");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        }
+
+        #[test]
+        fn multibyte_delimiter_straddles_blocks() {
+            let input = b"aaaa||bb||c";
+            // Capacities below the delimiter length force the straddle path.
+            for capacity in [1, 2, 3, 8 * 1024] {
+                let reader = BufReader::with_capacity(capacity, &input[..]);
+                let data = read_all_with_record_limit(Bytes::new(b"||"), reader, Some(6)).unwrap();
+                assert_eq!(data, input);
+            }
+        }
+
+        // The reverse plan's guard: a delimiter-less stream must abort near
+        // the limit, not be swallowed whole before the check.
+        #[test]
+        fn record_limit_stops_reading_an_endless_record() {
+            struct Counted<'a, R>(R, &'a Cell<usize>);
+            impl<R: io::Read> io::Read for Counted<'_, R> {
+                fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                    let n = self.0.read(buf)?;
+                    self.1.set(self.1.get() + n);
+                    Ok(n)
+                }
+            }
+            let big = vec![b'x'; 1024 * 1024];
+            let served = Cell::new(0);
+            let reader = BufReader::with_capacity(4 * 1024, Counted(&big[..], &served));
+            let err = read_all_with_record_limit(Byte(b'\n'), reader, Some(1024))
+                .expect_err("an endless record must be rejected");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert!(
+                served.get() <= 8 * 1024,
+                "the read must stop near the limit, served {}",
+                served.get()
+            );
         }
     }
 }

@@ -1,0 +1,6 @@
+start: 9
+end:   1 from the end (exclusive)
+step:  -1 (reverse)
+0-based: none (an end 1 from the end excludes every line a reverse step can reach)
+1-based: empty
+count: 0

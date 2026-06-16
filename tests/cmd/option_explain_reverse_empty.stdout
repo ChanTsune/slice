@@ -1,0 +1,6 @@
+start: 1
+end:   5 (exclusive)
+step:  -1 (reverse)
+0-based: none (start 1 is at or below end 5 for a reverse step)
+1-based: empty
+count: 0

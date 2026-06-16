@@ -11,14 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Negative `step` values, exactly like Python: `::-1` reverses the input, so
+  `slice ::-1 file` works like `tac`. Works in every mode (lines, `-b`,
+  `--delimiter`, `-z`); buffers the whole input in memory.
 - `--translate` flag that prints the equivalent `head`/`tail`/`sed`/`awk`/`dd`
   command for a range, for porting a `slice` call to a box that lacks it.
 - A cheatsheet at <https://chantsune.github.io/slice/> mapping common
   `head`/`tail`/`sed`/`awk`/`dd` recipes to `slice`.
 - One-line install for Linux/macOS (`curl … | sh`) and Windows (`irm … | iex`).
 - `--max-record-size <SIZE|unlimited>` as an opt-in guard for line/custom
-  delimiter tail-relative ranges. The default remains unlimited for
-  compatibility.
+  delimiter tail-relative and reverse ranges. The default remains unlimited
+  for compatibility.
 - Releases now include a `SHA256SUMS` manifest to verify downloads
   (`sha256sum -c SHA256SUMS`).
 

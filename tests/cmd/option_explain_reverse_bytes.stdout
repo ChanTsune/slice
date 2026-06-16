@@ -1,0 +1,6 @@
+start: last byte
+end:   start of input
+step:  -1 (reverse)
+0-based: bytes at indices [0, length) in reverse order
+1-based: from the last byte to the first byte
+count: until end of input (reverse)

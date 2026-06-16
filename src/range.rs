@@ -23,12 +23,39 @@ impl SliceIndex {
     }
 }
 
+/// A step with its direction. Python's negative step selects in reverse;
+/// zero stays unrepresentable (the parse rejects it).
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub(crate) enum Step {
+    Forward(NonZeroUsize),
+    Backward(NonZeroUsize),
+}
+
+impl Step {
+    #[inline]
+    pub(crate) fn magnitude(self) -> NonZeroUsize {
+        match self {
+            Step::Forward(step) | Step::Backward(step) => step,
+        }
+    }
+
+    /// Forward constructor for tests; panics on zero.
+    #[cfg(test)]
+    pub(crate) fn forward(step: usize) -> Step {
+        Step::Forward(NonZeroUsize::new(step).expect("test steps are nonzero"))
+    }
+}
+
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub(crate) struct SliceRange {
+    /// The parse defaults an absent start to `FromStart(0)` for a forward
+    /// step and `FromEnd(1)` (the last element) for a reverse one.
     pub(crate) start: SliceIndex,
-    /// `None` means unbounded (run to the end of input).
+    /// `None` means unbounded (run to the end of input; for a reverse step,
+    /// back through the first element).
     pub(crate) end: Option<SliceIndex>,
-    pub(crate) step: Option<NonZeroUsize>,
+    /// The parse defaults an absent step to `Forward(1)`.
+    pub(crate) step: Step,
 }
 
 /// What an element is, for `--translate`. Mirrors the `SliceMode` taxonomy in
@@ -103,6 +130,8 @@ pub(crate) enum ParseSliceRangeError {
     },
     #[error("a relative end ('+' or '+-') requires a count (e.g. '5:+3' or '5:+-3')")]
     MissingRelativeAmount,
+    #[error("a negative step cannot be combined with a relative end ('+' or '+-')")]
+    NegativeStepWithRelativeEnd,
     #[error("too many ':' separators in range (expected at most start:end:step)")]
     TooManyParts,
 }
@@ -139,6 +168,10 @@ pub(crate) enum Plan {
     /// Tail-relative: resolution needs the input length (per input), or a
     /// streaming buffer when the length is unknowable.
     Deferred(DeferredPlan),
+    /// Negative step: the first element out is in general the last element
+    /// in, so unlike Tail's bounded ring no fixed-size window suffices —
+    /// execution buffers the whole input.
+    Reverse(ReversePlan),
 }
 
 /// Tail (no output before EOF) and Lag (streams with a fixed delay) are
@@ -163,17 +196,60 @@ pub(crate) enum DeferredPlan {
     },
 }
 
+/// A negative-step range. Bounds keep their parsed form; [`Self::indices`]
+/// maps them onto a descending index walk once the element count is known.
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+pub(crate) struct ReversePlan {
+    /// Descending origin (`FromEnd(1)` is the last element).
+    start: SliceIndex,
+    /// Exclusive lower bound; `None` runs through the first element.
+    end: Option<SliceIndex>,
+    /// Magnitude of the negative step.
+    step: NonZeroUsize,
+}
+
+impl ReversePlan {
+    /// The selected indices in output (descending) order; empty when nothing
+    /// is selected. These are Python's rules for a negative step, which
+    /// differ from [`SliceIndex::resolve`]: an explicit head-relative start
+    /// clamps to the last element (`len-1`, not `len`), an end at or past the
+    /// last element excludes everything, and a tail-relative bound reaching
+    /// past the beginning empties the start but unbounds the end.
+    #[inline]
+    pub(crate) fn indices(&self, len: usize) -> impl Iterator<Item = usize> {
+        // `1..=0` is the empty walk.
+        let (first, lower) = self.resolve(len).unwrap_or((0, 1));
+        (lower..=first).rev().step_by(self.step.get())
+    }
+
+    /// The walk endpoints: descend from `first`, never below `lower`.
+    fn resolve(&self, len: usize) -> Option<(usize, usize)> {
+        let last = len.checked_sub(1)?;
+        let first = match self.start {
+            SliceIndex::FromStart(start) => start.min(last),
+            SliceIndex::FromEnd(back) => len.checked_sub(back.get())?,
+        };
+        let lower = match self.end {
+            None => 0,
+            Some(SliceIndex::FromStart(end)) => end.min(last) + 1,
+            Some(SliceIndex::FromEnd(back)) => len.checked_sub(back.get()).map_or(0, |end| end + 1),
+        };
+        (first >= lower).then_some((first, lower))
+    }
+}
+
 /// Classify absolute (head-relative) bounds into an execution plan.
 #[inline]
-fn classify(start: usize, end: Option<usize>, step: Option<NonZeroUsize>) -> SlicePlan {
+fn classify(start: usize, end: Option<usize>, step: NonZeroUsize) -> SlicePlan {
     // Checked before step: no step can select anything from `start >= end`.
     if end.is_some_and(|end| start >= end) {
-        return SlicePlan::Empty;
-    }
-    match step {
-        Some(step) if step.get() > 1 => SlicePlan::Stepped { start, end, step },
-        _ if start == 0 && end.is_none() => SlicePlan::Copy,
-        _ => SlicePlan::Window { start, end },
+        SlicePlan::Empty
+    } else if step.get() > 1 {
+        SlicePlan::Stepped { start, end, step }
+    } else if start == 0 && end.is_none() {
+        SlicePlan::Copy
+    } else {
+        SlicePlan::Window { start, end }
     }
 }
 
@@ -197,7 +273,7 @@ impl DeferredPlan {
         Some(classify(
             usize::try_from(start).ok()?,
             end.map(usize::try_from).transpose().ok()?,
-            Some(step),
+            step,
         ))
     }
 }
@@ -206,11 +282,28 @@ impl SliceRange {
     #[inline]
     pub(crate) fn plan(&self) -> Plan {
         use SliceIndex::*;
-        let step = self.step.unwrap_or(NonZeroUsize::MIN);
+        let step = match self.step {
+            Step::Backward(step) => {
+                return match (self.start, self.end) {
+                    // Descending from at or below the end selects nothing for
+                    // every length.
+                    (FromStart(s), Some(FromStart(e))) if s <= e => {
+                        Plan::Resolved(SlicePlan::Empty)
+                    }
+                    // L-k down to L-m descending: empty for every length when k >= m.
+                    (FromEnd(k), Some(FromEnd(m))) if k >= m => Plan::Resolved(SlicePlan::Empty),
+                    // An end 1 from the end stops at L-1, excluding every
+                    // index a descending walk can reach.
+                    (_, Some(FromEnd(m))) if m.get() == 1 => Plan::Resolved(SlicePlan::Empty),
+                    (start, end) => Plan::Reverse(ReversePlan { start, end, step }),
+                };
+            }
+            Step::Forward(step) => step,
+        };
         match (self.start, self.end) {
-            (FromStart(start), None) => Plan::Resolved(classify(start, None, self.step)),
+            (FromStart(start), None) => Plan::Resolved(classify(start, None, step)),
             (FromStart(start), Some(FromStart(end))) => {
-                Plan::Resolved(classify(start, Some(end), self.step))
+                Plan::Resolved(classify(start, Some(end), step))
             }
             // [L-k, L-m) is empty for every length when k <= m.
             (FromEnd(k), Some(FromEnd(m))) if k <= m => Plan::Resolved(SlicePlan::Empty),
@@ -226,7 +319,10 @@ impl SliceRange {
     /// Render a human-readable description of what this resolved range selects,
     /// without reading any input. `unit` names the elements (e.g. "line").
     pub(crate) fn explain(&self, unit: &str) -> String {
-        let step = self.step.map_or(1, NonZeroUsize::get);
+        let step = match self.step {
+            Step::Backward(step) => return explain_reverse(self.start, self.end, step.get(), unit),
+            Step::Forward(step) => step.get(),
+        };
         match (self.start, self.end) {
             (SliceIndex::FromStart(start), None) => explain_resolved(start, None, step, unit),
             (SliceIndex::FromStart(start), Some(SliceIndex::FromStart(end))) => {
@@ -246,7 +342,7 @@ impl SliceRange {
         let plan = self.plan();
         let empty = matches!(plan, Plan::Resolved(SlicePlan::Empty));
         let copy = matches!(plan, Plan::Resolved(SlicePlan::Copy));
-        let step = self.step.map_or(1, NonZeroUsize::get);
+        let step = self.step.magnitude().get();
         let candidate = |d: Dialect| -> Result<Translation, &'static str> {
             if copy {
                 Ok(("cat".to_owned(), None))
@@ -293,6 +389,9 @@ impl SliceRange {
         dialect: Dialect,
     ) -> Result<Translation, &'static str> {
         use SliceIndex::*;
+        if matches!(self.step, Step::Backward(_)) {
+            return translate_reverse(self.start, self.end, step, mode, dialect);
+        }
         match (self.start, self.end) {
             (FromStart(start), None) => translate_unbounded(start, step, mode, dialect),
             (FromStart(start), Some(FromStart(end))) => {
@@ -495,6 +594,150 @@ fn explain_tail(back: NonZeroUsize, end: Option<SliceIndex>, step: usize, unit: 
     out
 }
 
+/// A negative step: selection runs backward from `start` (default: the last
+/// element) down to just above `end`. The wording mirrors the forward forms.
+fn explain_reverse(start: SliceIndex, end: Option<SliceIndex>, step: usize, unit: &str) -> String {
+    use SliceIndex::*;
+    let mut out = String::new();
+    match start {
+        FromEnd(k) if k.get() == 1 => out.push_str(&format!("start: last {unit}\n")),
+        FromEnd(k) => out.push_str(&format!("start: {k} from the end\n")),
+        FromStart(s) => out.push_str(&format!("start: {s}\n")),
+    }
+    match end {
+        None => out.push_str("end:   start of input\n"),
+        Some(FromStart(e)) => out.push_str(&format!("end:   {e} (exclusive)\n")),
+        Some(FromEnd(m)) => out.push_str(&format!("end:   {m} from the end (exclusive)\n")),
+    }
+    out.push_str(&format!("step:  -{step} (reverse)\n"));
+
+    // Must stay in lockstep with the static-Empty arms in `plan()` so
+    // --explain agrees with execution.
+    let statically_empty = match (start, end) {
+        (FromStart(s), Some(FromStart(e))) if s <= e => Some(format!(
+            "0-based: none (start {s} is at or below end {e} for a reverse step)\n"
+        )),
+        (FromEnd(k), Some(FromEnd(m))) if k >= m => Some(format!(
+            "0-based: none (start {k} from the end is at or below end {m} from the end for a reverse step)\n"
+        )),
+        (_, Some(FromEnd(m))) if m.get() == 1 => Some(format!(
+            "0-based: none (an end 1 from the end excludes every {unit} a reverse step can reach)\n"
+        )),
+        _ => None,
+    };
+    if let Some(zero_based) = statically_empty {
+        out.push_str(&zero_based);
+        out.push_str("1-based: empty\n");
+        out.push_str("count: 0\n");
+        return out;
+    }
+
+    // 1-based endpoints of the walk, spelled from the parsed form.
+    let from = match start {
+        FromEnd(k) if k.get() == 1 => format!("the last {unit}"),
+        FromEnd(k) => format!("the {} {unit} from the end", ordinal(k.get())),
+        FromStart(s) => format!("the {} {unit}", ordinal(s.saturating_add(1))),
+    };
+    let to = match end {
+        None => format!("the first {unit}"),
+        Some(FromStart(e)) => format!("the {} {unit}", ordinal(e.saturating_add(2))),
+        Some(FromEnd(m)) => format!(
+            "the {} {unit} from the end",
+            ordinal(m.get().saturating_add(1))
+        ),
+    };
+
+    match start {
+        // Default-shaped start: the walk covers the length-anchored span
+        // `[lower, length-(k-1))`.
+        FromEnd(k) => {
+            let upper = match k.get() {
+                1 => "length".to_owned(),
+                k => format!("length-{}", k - 1),
+            };
+            let lower = match end {
+                None => "0".to_owned(),
+                Some(FromStart(e)) => format!("{}", e.saturating_add(1)),
+                Some(FromEnd(m)) => format!("length-{}", m.get() - 1),
+            };
+            out.push_str(&format!(
+                "0-based: {unit}s at indices [{lower}, {upper}) in reverse order"
+            ));
+            if step != 1 {
+                match k.get() {
+                    1 => out.push_str(&format!(", every {step} starting at the last")),
+                    k => out.push_str(&format!(", every {step} starting at {k} from the end")),
+                }
+            }
+            out.push('\n');
+        }
+        // Explicit start: the walk is a clamped descent from a fixed index.
+        FromStart(s) => {
+            let lower = match end {
+                None => "0".to_owned(),
+                Some(FromStart(e)) => format!("{} (end {e} exclusive)", e.saturating_add(1)),
+                Some(FromEnd(m)) => {
+                    let m = m.get();
+                    format!("length-{} (end length-{m} exclusive)", m - 1)
+                }
+            };
+            out.push_str(&format!("0-based: {unit}s at indices {s} down to {lower}"));
+            if step != 1 {
+                out.push_str(&format!(", every {step}"));
+            }
+            out.push_str(", clamped to the input length\n");
+        }
+    }
+
+    if step == 1 {
+        out.push_str(&format!("1-based: from {from} to {to}\n"));
+    } else {
+        out.push_str(&format!(
+            "1-based: every {step}{} {unit} from {from} to {to}\n",
+            ordinal_suffix(step)
+        ));
+    }
+
+    match (start, end) {
+        (FromEnd(_), None) => {
+            if step == 1 {
+                out.push_str("count: until end of input (reverse)\n");
+            } else {
+                out.push_str(&format!(
+                    "count: until end of input (reverse, step {step})\n"
+                ));
+            }
+        }
+        (FromEnd(_), Some(FromStart(e))) => {
+            let excluded = match e.saturating_add(1) {
+                1 => format!("the first {unit}"),
+                n => format!("the first {n} {unit}s"),
+            };
+            if step == 1 {
+                out.push_str(&format!(
+                    "count: until end of input (reverse), excluding {excluded}\n"
+                ));
+            } else {
+                out.push_str(&format!(
+                    "count: until end of input (reverse, step {step}), excluding {excluded}\n"
+                ));
+            }
+        }
+        // The walk spans at most `m - k` positions.
+        (FromEnd(k), Some(FromEnd(m))) => out.push_str(&format!(
+            "count: at most {}\n",
+            (m.get() - k.get()).div_ceil(step)
+        )),
+        // s down to 0 inclusive.
+        (FromStart(s), None) => out.push_str(&format!("count: at most {}\n", s / step + 1)),
+        (FromStart(s), Some(FromStart(e))) => {
+            out.push_str(&format!("count: at most {}\n", (s - e).div_ceil(step)))
+        }
+        (FromStart(_), Some(FromEnd(_))) => out.push_str("count: depends on the input length\n"),
+    }
+    out
+}
+
 /// A rendered translation: the shell command and an optional caveat shown as
 /// an inline note next to the dialect-labelled comment line.
 type Translation = (String, Option<&'static str>);
@@ -522,6 +765,11 @@ const TAIL_STEP_REASON: &str =
     "a tail-relative start combined with a step has no standard-tool equivalent";
 const TAIL_BOUNDED_REASON: &str = "a tail-relative start with a fixed end needs the input length";
 const HEAD_C_NOTE: &str = "head -c is not in POSIX; present on BSD and GNU";
+const REVERSE_POSIX_REASON: &str =
+    "no POSIX single command reverses line order; GNU has tac, BSD has tail -r";
+const REVERSE_PARTIAL_REASON: &str = "reversing a sub-range needs a pipeline, not a single command";
+const REVERSE_STEP_REASON: &str = "a reverse with a step needs a pipeline, not a single command";
+const REVERSE_BYTES_REASON: &str = "no standard tool reverses a byte stream";
 
 fn dialect_label(dialect: Dialect) -> &'static str {
     match dialect {
@@ -726,6 +974,37 @@ fn translate_lag(
     }
 }
 
+/// A negative step. Only the full line reverse (`::-1`) has single-command
+/// equivalents — GNU `tac` and BSD `tail -r`; any bound or stride needs a
+/// pipeline, and no standard tool reverses a byte stream. The
+/// statically-empty reverse forms are handled by `empty_candidate` before
+/// this is reached.
+fn translate_reverse(
+    start: SliceIndex,
+    end: Option<SliceIndex>,
+    step: usize,
+    mode: TranslateMode,
+    dialect: Dialect,
+) -> Result<Translation, &'static str> {
+    match mode {
+        TranslateMode::Custom => return Err(CUSTOM_REASON),
+        TranslateMode::Bytes => return Err(REVERSE_BYTES_REASON),
+        TranslateMode::Lines => {}
+    }
+    if start != SliceIndex::FromEnd(NonZeroUsize::MIN) || end.is_some() {
+        return Err(REVERSE_PARTIAL_REASON);
+    }
+    if step > 1 {
+        return Err(REVERSE_STEP_REASON);
+    }
+    match dialect {
+        Dialect::Gnu => Ok(("tac".to_owned(), None)),
+        Dialect::Bsd => Ok(("tail -r".to_owned(), None)),
+        Dialect::Posix => Err(REVERSE_POSIX_REASON),
+        Dialect::Awk => Err(AWK_TAIL_REASON),
+    }
+}
+
 /// `-back:…` — tail-relative start. Only `-back:` (unbounded) is statically
 /// expressible; any fixed or tail-relative end needs the input length. The
 /// statically-empty ends (`-back:0`, `-k:-m` with k<=m) are handled before this
@@ -775,27 +1054,63 @@ fn ordinal_suffix(n: usize) -> &'static str {
     }
 }
 
+/// The digit string after a leading `-`, when the lexeme is sign-then-digits
+/// (`-12`); `None` for anything else (`-`, `--1`, `-+1`).
+fn digit_shaped_magnitude(s: &str) -> Option<&str> {
+    s.strip_prefix('-')
+        .filter(|magnitude| magnitude.as_bytes().first().is_some_and(u8::is_ascii_digit))
+}
+
 /// Parse one bound of the range. A leading `-` followed by a bare digit string
 /// is tail-relative; anything else (`-`, `--1`, `-+1`) keeps the plain-integer
-/// parse error so rejection messages stay unchanged.
+/// parse error so rejection messages stay unchanged, while a digit-shaped
+/// magnitude reports its own failure (overflow) instead of blaming the `-`.
 fn parse_index(s: &str, field: RangeField) -> Result<Option<SliceIndex>, ParseSliceRangeError> {
     match s.parse::<usize>() {
         Ok(v) => Ok(Some(SliceIndex::FromStart(v))),
         Err(err) if *err.kind() == IntErrorKind::Empty => Ok(None),
         Err(source) => {
-            if let Some(magnitude) = s.strip_prefix('-') {
-                if magnitude.as_bytes().first().is_some_and(u8::is_ascii_digit) {
-                    if let Ok(v) = magnitude.parse::<usize>() {
+            let source = match digit_shaped_magnitude(s) {
+                Some(magnitude) => match magnitude.parse::<usize>() {
+                    Ok(v) => {
                         return Ok(Some(match NonZeroUsize::new(v) {
                             Some(back) => SliceIndex::FromEnd(back),
                             // Python has no -0: it means the head, not the end.
                             None => SliceIndex::FromStart(0),
                         }));
                     }
-                }
-            }
+                    Err(inner) => inner,
+                },
+                None => source,
+            };
             Err(ParseSliceRangeError::InvalidField {
                 field,
+                value: s.to_owned(),
+                source,
+            })
+        }
+    }
+}
+
+/// Parse the step field. A leading `-` followed by a bare nonzero digit
+/// string is a reverse step; a bare `-` and signed non-digits keep the
+/// plain-integer parse error, so rejection messages stay unchanged, while a
+/// digit-shaped magnitude reports its own failure (zero, overflow) instead of
+/// blaming the `-`.
+fn parse_step(s: &str) -> Result<Option<Step>, ParseSliceRangeError> {
+    match s.parse::<NonZeroUsize>() {
+        Ok(step) => Ok(Some(Step::Forward(step))),
+        Err(err) if *err.kind() == IntErrorKind::Empty => Ok(None),
+        Err(source) => {
+            let source = match digit_shaped_magnitude(s) {
+                Some(magnitude) => match magnitude.parse::<NonZeroUsize>() {
+                    Ok(step) => return Ok(Some(Step::Backward(step))),
+                    Err(inner) => inner,
+                },
+                None => source,
+            };
+            Err(ParseSliceRangeError::InvalidField {
+                field: RangeField::Step,
                 value: s.to_owned(),
                 source,
             })
@@ -833,13 +1148,59 @@ impl FromStr for SliceRange {
             parse(amount, RangeField::End)?.ok_or(ParseSliceRangeError::MissingRelativeAmount)
         };
 
+        /// The end field's parsed form, held until the step is known: the
+        /// relative forms resolve against the start for a forward step and are
+        /// rejected for a reverse one.
+        enum End {
+            Plain(Option<SliceIndex>),
+            Ahead(usize),
+            Window(usize),
+        }
+
         let mut ptn = s.split(':');
-        let start = parse_index(ptn.next().unwrap_or(""), RangeField::Start)?
-            .unwrap_or(SliceIndex::FromStart(0));
+        let start = parse_index(ptn.next().unwrap_or(""), RangeField::Start)?;
         let maybe_end = ptn.next().ok_or(ParseSliceRangeError::MissingColon)?;
-        let (start, end) = if let Some(amount) = maybe_end.strip_prefix("+-") {
-            let lines = relative_amount(amount)?;
-            match start {
+        // Parse the end before the step so field errors keep reporting left
+        // to right.
+        let end = if let Some(amount) = maybe_end.strip_prefix("+-") {
+            End::Window(relative_amount(amount)?)
+        } else if let Some(amount) = maybe_end.strip_prefix('+') {
+            End::Ahead(relative_amount(amount)?)
+        } else {
+            End::Plain(parse_index(maybe_end, RangeField::End)?)
+        };
+        let step = match ptn.next() {
+            Some(step) => parse_step(step)?,
+            None => None,
+        }
+        .unwrap_or(Step::Forward(NonZeroUsize::MIN));
+        if ptn.next().is_some() {
+            return Err(ParseSliceRangeError::TooManyParts);
+        }
+        let reverse = matches!(step, Step::Backward(_));
+        let (start, end) = match end {
+            End::Plain(end) => {
+                // A reverse walk starts from the last element by default.
+                let default = if reverse {
+                    SliceIndex::FromEnd(NonZeroUsize::MIN)
+                } else {
+                    SliceIndex::FromStart(0)
+                };
+                (start.unwrap_or(default), end)
+            }
+            End::Ahead(_) | End::Window(_) if reverse => {
+                return Err(ParseSliceRangeError::NegativeStepWithRelativeEnd)
+            }
+            End::Ahead(lines) => {
+                let start = start.unwrap_or(SliceIndex::FromStart(0));
+                match start {
+                    SliceIndex::FromStart(s) => {
+                        (start, Some(SliceIndex::FromStart(s.saturating_add(lines))))
+                    }
+                    SliceIndex::FromEnd(k) => (start, end_minus(k, lines)),
+                }
+            }
+            End::Window(lines) => match start.unwrap_or(SliceIndex::FromStart(0)) {
                 SliceIndex::FromStart(start) => (
                     SliceIndex::FromStart(start.saturating_sub(lines)),
                     Some(SliceIndex::FromStart(start.saturating_add(lines))),
@@ -850,25 +1211,8 @@ impl FromStr for SliceRange {
                     SliceIndex::FromEnd(k.saturating_add(lines)),
                     end_minus(k, lines),
                 ),
-            }
-        } else if let Some(amount) = maybe_end.strip_prefix('+') {
-            let lines = relative_amount(amount)?;
-            match start {
-                SliceIndex::FromStart(s) => {
-                    (start, Some(SliceIndex::FromStart(s.saturating_add(lines))))
-                }
-                SliceIndex::FromEnd(k) => (start, end_minus(k, lines)),
-            }
-        } else {
-            (start, parse_index(maybe_end, RangeField::End)?)
+            },
         };
-        let step = match ptn.next() {
-            Some(step) => Some(parse(step, RangeField::Step)?.unwrap_or(NonZeroUsize::MIN)),
-            None => None,
-        };
-        if ptn.next().is_some() {
-            return Err(ParseSliceRangeError::TooManyParts);
-        }
         Ok(Self { start, end, step })
     }
 }
@@ -885,7 +1229,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromStart(0),
                 end: Some(SliceIndex::FromStart(1)),
-                step: NonZeroUsize::new(1),
+                step: Step::forward(1),
             }
         );
     }
@@ -898,7 +1242,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromStart(0),
                 end: Some(SliceIndex::FromStart(1)),
-                step: None,
+                step: Step::forward(1),
             }
         );
         let slice = SliceRange::from_str("0:1:").expect("parse failed.");
@@ -907,7 +1251,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromStart(0),
                 end: Some(SliceIndex::FromStart(1)),
-                step: NonZeroUsize::new(1),
+                step: Step::forward(1),
             }
         );
     }
@@ -920,7 +1264,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromStart(0),
                 end: Some(SliceIndex::FromStart(1)),
-                step: NonZeroUsize::new(1),
+                step: Step::forward(1),
             }
         );
     }
@@ -933,7 +1277,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromStart(0),
                 end: None,
-                step: NonZeroUsize::new(1),
+                step: Step::forward(1),
             }
         );
     }
@@ -946,7 +1290,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromStart(0),
                 end: None,
-                step: NonZeroUsize::new(1),
+                step: Step::forward(1),
             }
         );
     }
@@ -959,7 +1303,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromStart(0),
                 end: None,
-                step: None,
+                step: Step::forward(1),
             }
         );
         let slice = SliceRange::from_str("::").expect("parse failed.");
@@ -968,7 +1312,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromStart(0),
                 end: None,
-                step: NonZeroUsize::new(1),
+                step: Step::forward(1),
             }
         );
     }
@@ -976,7 +1320,7 @@ mod tests {
     #[test]
     fn default_step_is_one() {
         let slice = SliceRange::from_str("0:1:").expect("parse failed.");
-        assert_eq!(slice.step, Some(NonZeroUsize::MIN));
+        assert_eq!(slice.step, Step::Forward(NonZeroUsize::MIN));
     }
 
     #[test]
@@ -1053,7 +1397,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromStart(1),
                 end: Some(SliceIndex::FromStart(2)),
-                step: None,
+                step: Step::forward(1),
             }
         )
     }
@@ -1066,7 +1410,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromStart(90),
                 end: Some(SliceIndex::FromStart(110)),
-                step: None,
+                step: Step::forward(1),
             }
         )
     }
@@ -1079,7 +1423,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromStart(0),
                 end: Some(SliceIndex::FromStart(15)),
-                step: None,
+                step: Step::forward(1),
             }
         )
     }
@@ -1091,7 +1435,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromStart(0),
                 end: Some(SliceIndex::FromEnd(NonZeroUsize::new(2).unwrap())),
-                step: None,
+                step: Step::forward(1),
             }
         );
         assert_eq!(
@@ -1099,7 +1443,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromStart(5),
                 end: Some(SliceIndex::FromEnd(NonZeroUsize::new(3).unwrap())),
-                step: NonZeroUsize::new(2),
+                step: Step::forward(2),
             }
         );
         assert_eq!(
@@ -1115,7 +1459,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromEnd(NonZeroUsize::new(5).unwrap()),
                 end: None,
-                step: None,
+                step: Step::forward(1),
             }
         );
         assert_eq!(
@@ -1123,7 +1467,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromEnd(NonZeroUsize::new(4).unwrap()),
                 end: None,
-                step: NonZeroUsize::new(2),
+                step: Step::forward(2),
             }
         );
         assert_eq!(
@@ -1131,7 +1475,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromEnd(NonZeroUsize::new(7).unwrap()),
                 end: Some(SliceIndex::FromStart(8)),
-                step: None,
+                step: Step::forward(1),
             }
         );
     }
@@ -1143,7 +1487,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromEnd(NonZeroUsize::new(7).unwrap()),
                 end: Some(SliceIndex::FromEnd(NonZeroUsize::new(2).unwrap())),
-                step: None,
+                step: Step::forward(1),
             }
         );
         assert_eq!(
@@ -1151,7 +1495,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromEnd(NonZeroUsize::new(4).unwrap()),
                 end: Some(SliceIndex::FromEnd(NonZeroUsize::new(1).unwrap())),
-                step: NonZeroUsize::new(2),
+                step: Step::forward(2),
             }
         );
     }
@@ -1243,7 +1587,7 @@ mod tests {
     fn deferred(range: &str) -> DeferredPlan {
         match SliceRange::from_str(range).unwrap().plan() {
             Plan::Deferred(deferred) => deferred,
-            Plan::Resolved(plan) => panic!("{range} must defer, resolved to {plan:?}"),
+            other => panic!("{range} must defer, planned {other:?}"),
         }
     }
 
@@ -1291,18 +1635,105 @@ mod tests {
                         let range = SliceRange {
                             start: start.map_or(SliceIndex::FromStart(0), bound),
                             end: end.map(bound),
-                            step: NonZeroUsize::new(step),
+                            step: Step::forward(step),
                         };
                         let plan = match range.plan() {
                             Plan::Resolved(plan) => plan,
                             Plan::Deferred(deferred) => deferred
                                 .resolve(len as u64)
                                 .expect("offsets fit usize on this platform"),
+                            Plan::Reverse(reverse) => {
+                                panic!("forward range planned {reverse:?}")
+                            }
                         };
                         assert_eq!(
                             selected(plan, len),
                             python_indices(start, end, step, len),
                             "len={len} start={start:?} end={end:?} step={step}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn plan_classifies_reverse() {
+        for range in ["::-1", "5:1:-1", "::-2", ":0:-1", "0::-1", "-1:-5:-1"] {
+            assert!(
+                matches!(
+                    SliceRange::from_str(range).unwrap().plan(),
+                    Plan::Reverse(_)
+                ),
+                "{range} must classify as a reverse plan"
+            );
+        }
+        // Statically empty for every length: no input read at all.
+        for range in ["1:5:-1", "5:5:-1", "-5:-2:-1", "-3:-3:-1", "9:-1:-1"] {
+            assert_eq!(
+                SliceRange::from_str(range).unwrap().plan(),
+                Plan::Resolved(SlicePlan::Empty),
+                "{range} selects nothing for every length"
+            );
+        }
+    }
+
+    #[test]
+    fn reverse_indices_match_python() {
+        fn bound(v: i64) -> SliceIndex {
+            match NonZeroUsize::new(v.unsigned_abs() as usize) {
+                Some(back) if v < 0 => SliceIndex::FromEnd(back),
+                _ => SliceIndex::FromStart(v as usize),
+            }
+        }
+        // Python slice(start, end, -step).indices(len): bounds clamp to
+        // [-1, len-1], the walk descends while the index stays above stop.
+        fn python_reverse_indices(
+            start: Option<i64>,
+            end: Option<i64>,
+            step: usize,
+            len: usize,
+        ) -> Vec<usize> {
+            let len = len as i64;
+            let clamp = |v: i64| {
+                if v < 0 {
+                    (len + v).max(-1)
+                } else {
+                    v.min(len - 1)
+                }
+            };
+            let first = start.map_or(len - 1, clamp);
+            let stop = end.map_or(-1, clamp);
+            let mut selected = Vec::new();
+            let mut i = first;
+            while i > stop {
+                selected.push(i as usize);
+                i -= step as i64;
+            }
+            selected
+        }
+
+        let bounds: Vec<Option<i64>> = std::iter::once(None).chain((-20..=20).map(Some)).collect();
+        for len in 0..=40usize {
+            for &start in &bounds {
+                for &end in &bounds {
+                    for step in [1usize, 2, 3, 7] {
+                        let range = SliceRange {
+                            // The parse defaults an absent reverse start to
+                            // the last element.
+                            start: start.map_or(SliceIndex::FromEnd(NonZeroUsize::MIN), bound),
+                            end: end.map(bound),
+                            step: Step::Backward(NonZeroUsize::new(step).unwrap()),
+                        };
+                        let selected: Vec<usize> = match range.plan() {
+                            Plan::Resolved(SlicePlan::Empty) => Vec::new(),
+                            Plan::Reverse(reverse) => reverse.indices(len).collect(),
+                            other => panic!("reverse range planned {other:?}"),
+                        };
+                        assert_eq!(
+                            selected,
+                            python_reverse_indices(start, end, step, len),
+                            "len={len} start={start:?} end={end:?} step=-{step}"
                         );
                     }
                 }
@@ -1345,7 +1776,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromEnd(NonZeroUsize::new(5).unwrap()),
                 end: Some(SliceIndex::FromEnd(NonZeroUsize::new(2).unwrap())),
-                step: None,
+                step: Step::forward(1),
             }
         );
     }
@@ -1369,7 +1800,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromEnd(NonZeroUsize::new(7).unwrap()),
                 end: Some(SliceIndex::FromEnd(NonZeroUsize::new(3).unwrap())),
-                step: None,
+                step: Step::forward(1),
             }
         );
         // -2:+-5 saturates past the end == s[-7:]
@@ -1378,7 +1809,7 @@ mod tests {
             SliceRange {
                 start: SliceIndex::FromEnd(NonZeroUsize::new(7).unwrap()),
                 end: None,
-                step: None,
+                step: Step::forward(1),
             }
         );
     }
@@ -1410,7 +1841,7 @@ mod tests {
                     let range = SliceRange {
                         start: SliceIndex::FromEnd(nz(k)),
                         end,
-                        step: None,
+                        step: Step::forward(1),
                     };
                     let statically_empty = matches!(range.plan(), Plan::Resolved(SlicePlan::Empty));
                     assert_eq!(
@@ -1479,7 +1910,7 @@ mod tests {
             let range = SliceRange {
                 start: SliceIndex::FromStart(usize::MAX),
                 end: None,
-                step: None,
+                step: Step::forward(1),
             };
             let text = range.explain("line");
             assert!(text.contains("from the 18446744073709551615th line"));
@@ -2002,8 +2433,8 @@ mod tests {
         }
 
         #[test]
-        fn negative_step_stays_rejected() {
-            for step in ["::-1", "::0"] {
+        fn zero_and_malformed_steps_stay_rejected() {
+            for step in ["::0", "::-", "::-0", "::-+1", "::--1"] {
                 assert!(
                     matches!(
                         SliceRange::from_str(step).unwrap_err(),
@@ -2012,7 +2443,59 @@ mod tests {
                             ..
                         }
                     ),
-                    "{step} must keep rejecting non-positive steps"
+                    "{step} must keep rejecting its step"
+                );
+            }
+        }
+
+        #[test]
+        fn digit_shaped_rejections_report_their_own_cause() {
+            // The magnitude's own failure, not the sign parse's
+            // "invalid digit" tripped by the '-'.
+            for (range, cause) in [
+                ("::-99999999999999999999", "number too large"),
+                ("::-0", "zero"),
+                ("-99999999999999999999:", "number too large"),
+            ] {
+                let err = SliceRange::from_str(range).unwrap_err();
+                assert!(
+                    err.to_string().contains(cause),
+                    "{range} must report its cause, got: {err}"
+                );
+            }
+        }
+
+        #[test]
+        fn negative_step_parses_reverse() {
+            assert_eq!(
+                SliceRange::from_str("::-1").unwrap(),
+                SliceRange {
+                    start: SliceIndex::FromEnd(NonZeroUsize::MIN),
+                    end: None,
+                    step: Step::Backward(NonZeroUsize::MIN),
+                }
+            );
+            // An explicit start keeps its parsed form instead of the
+            // last-element default.
+            assert_eq!(
+                SliceRange::from_str("5:1:-2").unwrap(),
+                SliceRange {
+                    start: SliceIndex::FromStart(5),
+                    end: Some(SliceIndex::FromStart(1)),
+                    step: Step::Backward(NonZeroUsize::new(2).unwrap()),
+                }
+            );
+        }
+
+        #[test]
+        fn negative_step_rejects_relative_end() {
+            for range in ["5:+3:-1", "5:+-3:-1"] {
+                assert!(
+                    matches!(
+                        SliceRange::from_str(range).unwrap_err(),
+                        ParseSliceRangeError::NegativeStepWithRelativeEnd
+                    ),
+                    "{range} must reject a relative end with a reverse step"
                 );
             }
         }

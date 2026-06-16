@@ -1,0 +1,4 @@
+bin.name = "slice"
+args = ["-b", "::-1"]
+status.code = 0
+binary = true

@@ -1,0 +1,6 @@
+start: last line
+end:   5 from the end (exclusive)
+step:  -2 (reverse)
+0-based: lines at indices [length-4, length) in reverse order, every 2 starting at the last
+1-based: every 2nd line from the last line to the 6th line from the end
+count: at most 2
