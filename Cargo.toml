@@ -13,10 +13,16 @@ repository = "https://github.com/ChanTsune/slice.git"
 categories = ["text-processing", "command-line-utilities"]
 keywords = ["text", "utility", "tool"]
 rust-version = "1.85"
-# `docs/` is the GitHub Pages source (cheatsheet SSOT + generated HTML) and
-# `.cargo/` holds the local `cargo xtask` alias; both are repository tooling,
-# not part of the published crate.
-exclude = ["/docs", "/.cargo", "/install.sh", "/install.ps1"]
+# LICENSE-* must be listed explicitly: the SPDX `license` field above does
+# not auto-include them the way a `license-file` field would.
+include = [
+    "/src",
+    "/tests",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE-APACHE",
+    "/LICENSE-MIT",
+]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
