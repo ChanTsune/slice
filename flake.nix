@@ -5,8 +5,15 @@
     utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, utils, naersk }:
-    utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      utils,
+      naersk,
+    }:
+    utils.lib.eachDefaultSystem (
+      system:
       let
         pkgs = import nixpkgs { inherit system; };
         naersk-lib = pkgs.callPackage naersk { };
@@ -36,13 +43,26 @@
           meta = with pkgs.lib; {
             description = "Slice file contents using Python-like slice notation";
             homepage = "https://github.com/ChanTsune/slice";
-            license = with licenses; [ asl20 mit ];
+            license = with licenses; [
+              asl20
+              mit
+            ];
             mainProgram = "slice";
           };
         };
         devShells.default = pkgs.mkShell {
-          buildInputs = with pkgs; [ cargo rustc rustfmt rustPackages.clippy ];
+          buildInputs = with pkgs; [
+            cargo
+            rustc
+            rustfmt
+            rustPackages.clippy
+          ];
           RUST_SRC_PATH = pkgs.rustPlatform.rustLibSrc;
         };
-      });
+
+        # `nix fmt` — nixfmt-tree is a zero-config treefmt wrapper that
+        # recursively formats every *.nix file with nixfmt (RFC style).
+        formatter = pkgs.nixfmt-tree;
+      }
+    );
 }
