@@ -31,6 +31,30 @@ impl FromStr for NonZeroByteSize {
     }
 }
 
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+pub(crate) enum MaxRecordSize {
+    Unlimited,
+    Limited(usize),
+}
+
+impl FromStr for MaxRecordSize {
+    type Err = String;
+
+    #[inline]
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.eq_ignore_ascii_case("unlimited") {
+            return Ok(Self::Unlimited);
+        }
+        let bs = ByteSize::from_str(s).map_err(|err| err.to_string())?;
+        if bs.0 == 0 {
+            return Err("0 is not allowed".to_owned());
+        }
+        let limit =
+            usize::try_from(bs.0).map_err(|_| "size is too large for this platform".to_owned())?;
+        Ok(Self::Limited(limit))
+    }
+}
+
 #[derive(Parser, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 #[command(
     name = env!("CARGO_BIN_NAME"),
@@ -139,6 +163,12 @@ e.g., '50:+50'"
         help = "Set the size of the I/O buffer. This buffer is used for both input and output operations (experimental)"
     )]
     pub(crate) io_buffer_size: Option<NonZeroByteSize>,
+    #[arg(
+        long,
+        value_name = "SIZE|unlimited",
+        help = "Maximum bytes retained for one line/custom-delimited record in tail-relative ranges. Defaults to unlimited"
+    )]
+    pub(crate) max_record_size: Option<MaxRecordSize>,
     #[arg(help = "Target files. if not provided use stdin")]
     pub(crate) files: Vec<PathBuf>,
 }
@@ -147,6 +177,14 @@ impl Args {
     #[inline]
     pub(crate) fn io_buffer_size(&self) -> Option<usize> {
         self.io_buffer_size.map(|it| it.0.as_u64() as usize)
+    }
+
+    #[inline]
+    pub(crate) fn max_record_size(&self) -> Option<usize> {
+        match self.max_record_size {
+            Some(MaxRecordSize::Limited(limit)) => Some(limit),
+            Some(MaxRecordSize::Unlimited) | None => None,
+        }
     }
 
     /// Resolve the effective delimiter bytes. `--null` yields a single NUL
@@ -317,6 +355,25 @@ mod tests {
             .expect("bytes arg");
         let help = arg.get_help().expect("help text").to_string();
         assert!(help.to_lowercase().contains("byte"));
+    }
+
+    #[test]
+    fn max_record_size_parses_limit() {
+        let args = Args::parse_from(["slice", "--max-record-size", "4KB", "-1:"]);
+        assert_eq!(args.max_record_size(), Some(4_000));
+    }
+
+    #[test]
+    fn max_record_size_unlimited_is_none() {
+        let args = Args::parse_from(["slice", "--max-record-size", "unlimited", "-1:"]);
+        assert_eq!(args.max_record_size(), None);
+    }
+
+    #[test]
+    fn max_record_size_rejects_zero() {
+        let err = Args::try_parse_from(["slice", "--max-record-size", "0", "-1:"])
+            .expect_err("zero is invalid");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]

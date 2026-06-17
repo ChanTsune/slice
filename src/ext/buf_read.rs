@@ -2,9 +2,60 @@ use crate::{ext::IteratorExt, range::SliceIndex};
 use memchr::memmem;
 use std::{
     collections::VecDeque,
+    fmt,
     io::{self, BufRead, Write},
     num::NonZeroUsize,
 };
+
+#[derive(Debug)]
+struct RecordSizeLimitExceeded {
+    limit: usize,
+}
+
+impl fmt::Display for RecordSizeLimitExceeded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "record exceeds --max-record-size={} bytes in tail-relative line/custom delimiter mode; use --max-record-size=unlimited to allow larger records",
+            self.limit
+        )
+    }
+}
+
+impl std::error::Error for RecordSizeLimitExceeded {}
+
+struct LimitedVec<'a> {
+    buf: &'a mut Vec<u8>,
+    limit: Option<usize>,
+}
+
+impl<'a> LimitedVec<'a> {
+    #[inline]
+    fn new(buf: &'a mut Vec<u8>, limit: Option<usize>) -> Self {
+        Self { buf, limit }
+    }
+}
+
+impl Write for LimitedVec<'_> {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(limit) = self.limit {
+            if self.buf.len().saturating_add(buf.len()) > limit {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    RecordSizeLimitExceeded { limit },
+                ));
+            }
+        }
+        self.buf.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    #[inline]
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
 
 /// Scan to the first `delim` byte. `sink` receives each consumed slice; it is the
 /// only thing that differs between emitting (write through) and skipping
@@ -327,11 +378,23 @@ pub(crate) fn slice_stepped<S: Split, R: BufRead, W: Write>(
 /// and the selection stays below it).
 pub(crate) fn slice_tail<S: Split, R: BufRead, W: Write>(
     split: S,
+    input: R,
+    output: W,
+    back: NonZeroUsize,
+    end: Option<SliceIndex>,
+    step: NonZeroUsize,
+) -> io::Result<()> {
+    slice_tail_with_record_limit(split, input, output, back, end, step, None)
+}
+
+pub(crate) fn slice_tail_with_record_limit<S: Split, R: BufRead, W: Write>(
+    split: S,
     mut input: R,
     mut output: W,
     back: NonZeroUsize,
     end: Option<SliceIndex>,
     step: NonZeroUsize,
+    max_record_size: Option<usize>,
 ) -> io::Result<()> {
     let cap = back.get();
     let bound = match end {
@@ -352,7 +415,8 @@ pub(crate) fn slice_tail<S: Split, R: BufRead, W: Write>(
         }
         scratch.clear();
         // EOF is decided before placement so a recycled slot keeps its chunk.
-        if split.read_to(&mut input, &mut scratch)? == 0 {
+        let mut limited = LimitedVec::new(&mut scratch, max_record_size);
+        if split.read_to(&mut input, &mut limited)? == 0 {
             break;
         }
         let slot = total % cap;
@@ -378,11 +442,23 @@ pub(crate) fn slice_tail<S: Split, R: BufRead, W: Write>(
 /// is O(ceil(m/step)) entries, recycled through a free pool.
 pub(crate) fn slice_lag<S: Split, R: BufRead, W: Write>(
     split: S,
+    input: R,
+    output: W,
+    start: usize,
+    back: NonZeroUsize,
+    step: NonZeroUsize,
+) -> io::Result<()> {
+    slice_lag_with_record_limit(split, input, output, start, back, step, None)
+}
+
+pub(crate) fn slice_lag_with_record_limit<S: Split, R: BufRead, W: Write>(
+    split: S,
     mut input: R,
     mut output: W,
     start: usize,
     back: NonZeroUsize,
     step: NonZeroUsize,
+    max_record_size: Option<usize>,
 ) -> io::Result<()> {
     if split.skip_n(&mut input, start)? < start {
         return output.flush();
@@ -399,7 +475,8 @@ pub(crate) fn slice_lag<S: Split, R: BufRead, W: Write>(
         let len = if selected {
             let mut buf = free.pop().unwrap_or_default();
             buf.clear();
-            let len = split.read_to(&mut input, &mut buf)?;
+            let mut limited = LimitedVec::new(&mut buf, max_record_size);
+            let len = split.read_to(&mut input, &mut limited)?;
             if len > 0 {
                 pending.push_back((next, buf));
             } else {
@@ -1027,6 +1104,26 @@ mod tests {
             out
         }
 
+        fn lagged_limited<S: Split>(
+            split: S,
+            input: &[u8],
+            start: usize,
+            m: usize,
+            limit: usize,
+        ) -> io::Result<Vec<u8>> {
+            let mut out = Vec::new();
+            slice_lag_with_record_limit(
+                split,
+                BufReader::with_capacity(2, input),
+                &mut out,
+                start,
+                NonZeroUsize::new(m).unwrap(),
+                NonZeroUsize::MIN,
+                Some(limit),
+            )?;
+            Ok(out)
+        }
+
         const INPUT: &[u8] = b"a\nb\nc\nd\ne\n";
 
         #[test]
@@ -1087,6 +1184,30 @@ mod tests {
             assert_eq!(
                 lagged(Byte(b'\n'), input, 0, 1, 1, 8 * 1024),
                 b"sl\xaace\nbin\xff\n"
+            );
+        }
+
+        #[test]
+        fn record_limit_allows_exact_size() {
+            assert_eq!(
+                lagged_limited(Byte(b'\n'), b"abc\ndef\n", 0, 1, 4).unwrap(),
+                b"abc\n"
+            );
+        }
+
+        #[test]
+        fn record_limit_rejects_selected_oversized_chunk() {
+            let err = lagged_limited(Byte(b'\n'), b"abcd\ne\n", 0, 1, 4)
+                .expect_err("selected chunk exceeds limit");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert!(err.to_string().contains("--max-record-size=4 bytes"));
+        }
+
+        #[test]
+        fn record_limit_does_not_apply_to_skipped_chunks() {
+            assert_eq!(
+                lagged_limited(Byte(b'\n'), b"huge\nok\nx\n", 1, 1, 3).unwrap(),
+                b"ok\n"
             );
         }
 
@@ -1192,6 +1313,25 @@ mod tests {
             out
         }
 
+        fn tailed_limited<S: Split>(
+            split: S,
+            input: &[u8],
+            k: usize,
+            limit: usize,
+        ) -> io::Result<Vec<u8>> {
+            let mut out = Vec::new();
+            slice_tail_with_record_limit(
+                split,
+                BufReader::with_capacity(2, input),
+                &mut out,
+                NonZeroUsize::new(k).unwrap(),
+                None,
+                NonZeroUsize::MIN,
+                Some(limit),
+            )?;
+            Ok(out)
+        }
+
         fn at(end: usize) -> Option<SliceIndex> {
             Some(SliceIndex::FromStart(end))
         }
@@ -1269,6 +1409,30 @@ mod tests {
                 tailed(Byte(b'\n'), INPUT, 4, from_end(1), 2, 8 * 1024),
                 b"b\nd\n"
             );
+        }
+
+        #[test]
+        fn record_limit_allows_exact_size() {
+            assert_eq!(
+                tailed_limited(Byte(b'\n'), b"abc\ndef\n", 1, 4).unwrap(),
+                b"def\n"
+            );
+        }
+
+        #[test]
+        fn record_limit_rejects_oversized_tail_chunk() {
+            let err = tailed_limited(Byte(b'\n'), b"ok\nabcd\n", 1, 4)
+                .expect_err("tail chunk exceeds limit");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert!(err.to_string().contains("--max-record-size=4 bytes"));
+        }
+
+        #[test]
+        fn record_limit_applies_to_multibyte_delimiter_chunks() {
+            let err = tailed_limited(Bytes::new(b"||"), b"abcde||", 1, 6)
+                .expect_err("custom-delimited chunk exceeds limit");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert!(err.to_string().contains("--max-record-size=6 bytes"));
         }
 
         #[test]

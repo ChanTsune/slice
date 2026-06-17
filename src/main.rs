@@ -5,7 +5,10 @@ mod ext;
 mod range;
 
 use crate::{
-    ext::{slice_lag, slice_stepped, slice_tail, slice_window, Byte, Bytes},
+    ext::{
+        slice_lag, slice_lag_with_record_limit, slice_stepped, slice_tail,
+        slice_tail_with_record_limit, slice_window, Byte, Bytes,
+    },
     range::{DeferredPlan, Plan, SliceIndex, SlicePlan, SliceRange},
 };
 use clap::{CommandFactory, Parser};
@@ -494,10 +497,23 @@ fn delimit_tail<R: BufRead, W: Write>(
     back: NonZeroUsize,
     end: Option<SliceIndex>,
     step: NonZeroUsize,
+    max_record_size: Option<usize>,
 ) -> io::Result<()> {
     debug_assert!(!delimiter.is_empty(), "empty delimiter is byte mode");
     match delimiter {
+        &[b] if max_record_size.is_some() => {
+            slice_tail_with_record_limit(Byte(b), input, output, back, end, step, max_record_size)
+        }
         &[b] => slice_tail(Byte(b), input, output, back, end, step),
+        multi if max_record_size.is_some() => slice_tail_with_record_limit(
+            Bytes::new(multi),
+            input,
+            output,
+            back,
+            end,
+            step,
+            max_record_size,
+        ),
         multi => slice_tail(Bytes::new(multi), input, output, back, end, step),
     }
 }
@@ -510,10 +526,23 @@ fn delimit_lag<R: BufRead, W: Write>(
     start: usize,
     back: NonZeroUsize,
     step: NonZeroUsize,
+    max_record_size: Option<usize>,
 ) -> io::Result<()> {
     debug_assert!(!delimiter.is_empty(), "empty delimiter is byte mode");
     match delimiter {
+        &[b] if max_record_size.is_some() => {
+            slice_lag_with_record_limit(Byte(b), input, output, start, back, step, max_record_size)
+        }
         &[b] => slice_lag(Byte(b), input, output, start, back, step),
+        multi if max_record_size.is_some() => slice_lag_with_record_limit(
+            Bytes::new(multi),
+            input,
+            output,
+            start,
+            back,
+            step,
+            max_record_size,
+        ),
         multi => slice_lag(Bytes::new(multi), input, output, start, back, step),
     }
 }
@@ -524,18 +553,39 @@ fn apply_deferred<R: BufRead, W: Write>(
     input: R,
     output: W,
     plan: DeferredPlan,
+    max_record_size: Option<usize>,
 ) -> io::Result<()> {
     match plan {
         DeferredPlan::Tail { back, end, step } => match mode {
+            SliceMode::Lines if max_record_size.is_some() => slice_tail_with_record_limit(
+                Byte(b'\n'),
+                input,
+                output,
+                back,
+                end,
+                step,
+                max_record_size,
+            ),
             SliceMode::Lines => slice_tail(Byte(b'\n'), input, output, back, end, step),
             SliceMode::Bytes => byte_tail(input, output, back, end, step),
-            SliceMode::Custom(delimiter) => delimit_tail(input, output, delimiter, back, end, step),
+            SliceMode::Custom(delimiter) => {
+                delimit_tail(input, output, delimiter, back, end, step, max_record_size)
+            }
         },
         DeferredPlan::Lag { start, back, step } => match mode {
+            SliceMode::Lines if max_record_size.is_some() => slice_lag_with_record_limit(
+                Byte(b'\n'),
+                input,
+                output,
+                start,
+                back,
+                step,
+                max_record_size,
+            ),
             SliceMode::Lines => slice_lag(Byte(b'\n'), input, output, start, back, step),
             SliceMode::Bytes => byte_lag(input, output, start, back, step),
             SliceMode::Custom(delimiter) => {
-                delimit_lag(input, output, delimiter, start, back, step)
+                delimit_lag(input, output, delimiter, start, back, step, max_record_size)
             }
         },
     }
@@ -618,6 +668,7 @@ fn entry(args: cli::Args) -> bool {
         return stdout_status(generate_mode(stdout().lock(), kind));
     }
     let io_buffer_size = args.io_buffer_size();
+    let max_record_size = args.max_record_size();
     let delimiter = match args.delimiter() {
         Ok(delimiter) => delimiter,
         Err(e) => cli::Args::command()
@@ -652,7 +703,9 @@ fn entry(args: cli::Args) -> bool {
         let output = buf_writer(stdout().lock(), io_buffer_size);
         let result = match plan {
             Plan::Resolved(plan) => apply(&mode, input, output, plan, discard),
-            Plan::Deferred(deferred) => apply_deferred(&mode, input, output, deferred),
+            Plan::Deferred(deferred) => {
+                apply_deferred(&mode, input, output, deferred, max_record_size)
+            }
         };
         stdout_status(result)
     } else {
@@ -678,7 +731,7 @@ fn entry(args: cli::Args) -> bool {
                             .flatten();
                         match len.and_then(|len| deferred.resolve(len)) {
                             Some(plan) => apply(&mode, input, output, plan, seek),
-                            None => apply_deferred(&mode, input, output, deferred),
+                            None => apply_deferred(&mode, input, output, deferred, max_record_size),
                         }
                     }
                 }
@@ -974,6 +1027,8 @@ mod tests {
     }
 
     mod broken_pipe {
+        use crate::ext::{slice_lag, slice_tail};
+
         use super::*;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1445,7 +1500,7 @@ mod tests {
         // The streaming fallback entry() takes when the length is unknowable.
         fn via_streaming(input: &[u8], plan: DeferredPlan) -> Vec<u8> {
             let mut out = Vec::new();
-            apply_deferred(&SliceMode::Bytes, input, &mut out, plan).expect("");
+            apply_deferred(&SliceMode::Bytes, input, &mut out, plan, None).expect("");
             out
         }
 
@@ -1927,7 +1982,7 @@ mod tests {
                             apply(mode, INPUT, &mut out, plan, discard).expect("")
                         }
                         Plan::Deferred(deferred) => {
-                            apply_deferred(mode, INPUT, &mut out, deferred).expect("")
+                            apply_deferred(mode, INPUT, &mut out, deferred, None).expect("")
                         }
                     }
                     out
@@ -2020,7 +2075,7 @@ mod tests {
                 Plan::Resolved(plan) => panic!("-1: must defer, got {plan:?}"),
             };
             let mut out = Vec::new();
-            apply_deferred(&SliceMode::Lines, NoReadReader, &mut out, plan)
+            apply_deferred(&SliceMode::Lines, NoReadReader, &mut out, plan, None)
                 .expect_err("a tail-relative start must read the input");
         }
     }
