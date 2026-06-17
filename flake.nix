@@ -17,6 +17,22 @@
           name = "slice";
           version = cargoToml.package.version;
           src = ./.;
+
+          nativeBuildInputs = [ pkgs.installShellFiles ];
+
+          # Ship the bash/zsh/fish completions and man page that the release
+          # tarball provides. naersk copies the built binary into $out/bin
+          # before running postInstall, so it can generate them here.
+          postInstall = ''
+            installShellCompletion --cmd slice \
+              --bash <($out/bin/slice --generate complete-bash) \
+              --zsh  <($out/bin/slice --generate complete-zsh) \
+              --fish <($out/bin/slice --generate complete-fish)
+
+            $out/bin/slice --generate man > slice.1
+            installManPage slice.1
+          '';
+
           meta = with pkgs.lib; {
             description = "Slice file contents using Python-like slice notation";
             homepage = "https://github.com/ChanTsune/slice";
