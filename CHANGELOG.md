@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A cheatsheet at <https://chantsune.github.io/slice/> mapping common
   `head`/`tail`/`sed`/`awk`/`dd` recipes to `slice`.
 - One-line install for Linux/macOS (`curl … | sh`) and Windows (`irm … | iex`).
+- `--max-record-size <SIZE|unlimited>` as an opt-in guard for line/custom
+  delimiter tail-relative ranges. The default remains unlimited for
+  compatibility.
 
 ## [0.5.0] - 2026-06-13
 

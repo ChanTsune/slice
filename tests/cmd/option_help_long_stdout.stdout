@@ -32,6 +32,8 @@ Options:
           Suppresses printing of headers when multiple files are being examined
       --io-buffer-size <IO_BUFFER_SIZE>
           Set the size of the I/O buffer. This buffer is used for both input and output operations (experimental)
+      --max-record-size <SIZE|unlimited>
+          Maximum bytes retained for one line/custom-delimited record in tail-relative ranges. Defaults to unlimited
   -h, --help
           Print help
   -V, --version
