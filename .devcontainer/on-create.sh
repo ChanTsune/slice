@@ -10,7 +10,7 @@ set -euxo pipefail
 # The direnv volume is created root-owned on first mount.
 sudo chown "$(id -un):$(id -gn)" "$HOME/.local/share/direnv"
 
-nix profile install nixpkgs#direnv nixpkgs#nix-direnv
+nix profile add nixpkgs#direnv nixpkgs#nix-direnv nixpkgs#gh
 
 # nix-direnv caches the dev shell and protects it from garbage collection.
 mkdir -p "$HOME/.config/direnv"
