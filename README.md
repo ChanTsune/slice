@@ -54,8 +54,30 @@ brew install chantsune/tap/slice
 
 ### Via Nix
 
+Try without installing:
+
 ```sh
-nix-env --install -f https://github.com/chantsune/slice/tarball/main
+nix run github:ChanTsune/slice -- :5 file.txt
+```
+
+Install permanently:
+
+```sh
+nix profile add github:ChanTsune/slice
+```
+
+To contribute, enter the development shell after cloning:
+
+```sh
+nix develop
+# or automatically with direnv:
+direnv allow
+```
+
+Non-flake fallback:
+
+```sh
+nix-env --install -f https://github.com/ChanTsune/slice/tarball/main
 ```
 
 ### Via Cargo
