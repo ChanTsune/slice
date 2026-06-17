@@ -4,13 +4,21 @@
 
 # Slice
 
+[![CI][ci-badge]][ci-url]
+[![Crates.io][crates-badge]][crates-url]
+[![Downloads][downloads-badge]][crates-url]
+[![License][license-badge]](#license)
+[![MSRV][msrv-badge]][crates-url]
+
 Slice is a command-line tool written in Rust that allows you to slice the contents of a file using syntax similar to Python's slice notation.
 
-![test_workflow](https://github.com/ChanTsune/slice/actions/workflows/test.yml/badge.svg)
-[![Crates.io][crates-badge]][crates-url]
-
+[ci-badge]: https://github.com/ChanTsune/slice/actions/workflows/test.yml/badge.svg
+[ci-url]: https://github.com/ChanTsune/slice/actions/workflows/test.yml
 [crates-badge]: https://img.shields.io/crates/v/slice-command.svg
 [crates-url]: https://crates.io/crates/slice-command
+[downloads-badge]: https://img.shields.io/crates/d/slice-command.svg
+[license-badge]: https://img.shields.io/badge/license-Apache--2.0_OR_MIT-blue.svg
+[msrv-badge]: https://img.shields.io/crates/msrv/slice-command.svg
 
 ## Installation
 
