@@ -10,15 +10,23 @@
       let
         pkgs = import nixpkgs { inherit system; };
         naersk-lib = pkgs.callPackage naersk { };
+        cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
       in
       {
-        defaultPackage = naersk-lib.buildPackage {
-            name = "slice";
-            src = ./.;
+        packages.default = naersk-lib.buildPackage {
+          name = "slice";
+          version = cargoToml.package.version;
+          src = ./.;
+          meta = with pkgs.lib; {
+            description = "Slice file contents using Python-like slice notation";
+            homepage = "https://github.com/ChanTsune/slice";
+            license = with licenses; [ asl20 mit ];
+            mainProgram = "slice";
+          };
         };
-        devShell = with pkgs; mkShell {
-          buildInputs = [ cargo rustc rustfmt rustPackages.clippy ];
-          RUST_SRC_PATH = rustPlatform.rustLibSrc;
+        devShells.default = pkgs.mkShell {
+          buildInputs = with pkgs; [ cargo rustc rustfmt rustPackages.clippy ];
+          RUST_SRC_PATH = pkgs.rustPlatform.rustLibSrc;
         };
       });
 }
