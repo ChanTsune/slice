@@ -184,3 +184,50 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         TAG: ${{ needs.create-release.outputs.slice_version }}
       run: gh release upload "$TAG" "$ASSET" --clobber
+
+  checksums:
+    name: checksums
+    needs: ['create-release', 'build-release']
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release archives
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.create-release.outputs.slice_version }}
+        run: |
+          rm -rf dist
+          mkdir dist
+          # Completions/man are uploaded as a GitHub Actions artifact, not a
+          # release asset, so they are never matched here -- only the per-target
+          # archives are. Scoping with --pattern also keeps a re-run from
+          # re-downloading (and self-hashing) a previously published SHA256SUMS.
+          gh release download "$TAG" \
+            --dir dist \
+            --pattern 'slice-*.tar.gz' \
+            --pattern 'slice-*.zip'
+
+      - name: Generate SHA256SUMS
+        shell: bash
+        working-directory: dist
+        run: |
+          shopt -s nullglob
+          files=( slice-*.tar.gz slice-*.zip )
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::no release archives found to checksum"
+            exit 1
+          fi
+          # Hash bare filenames (not paths) so `sha256sum -c SHA256SUMS` works
+          # for users running it from the directory holding the archives.
+          sha256sum "${files[@]}" > SHA256SUMS
+          cat SHA256SUMS
+          # Self-check the manifest round-trips before we publish it.
+          sha256sum -c SHA256SUMS
+
+      - name: Upload SHA256SUMS to release
+        shell: bash
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.create-release.outputs.slice_version }}
+        run: gh release upload "$TAG" SHA256SUMS --clobber
