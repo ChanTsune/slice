@@ -56,7 +56,7 @@ jobs:
             # Pin a known release on one Unix job.
             version_env: 0.5.0
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # $RUNNER_TEMP / runner paths can't be referenced from matrix.include
       # (matrix values are fixed before env/runtime contexts exist), so set the
       # custom install dir in a step ($RUNNER_TEMP is always writable).
@@ -124,7 +124,7 @@ jobs:
         run: |
           git config --global core.autocrlf false
           git config --global core.eol lf
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # $RUNNER_TEMP / runner paths can't be referenced from matrix.include
       # (matrix values are fixed before env/runtime contexts exist), so set the
       # custom install dir in a step ($RUNNER_TEMP is always writable).
@@ -183,7 +183,7 @@ jobs:
     name: install.sh rejects a missing version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: A missing version must fail
         env:
           SLICE_VERSION: 0.0.0-does-not-exist
@@ -201,7 +201,7 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: A missing version must fail
         env:
           SLICE_VERSION: 0.0.0-does-not-exist
