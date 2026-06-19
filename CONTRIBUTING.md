@@ -40,3 +40,39 @@ actual output with `TRYCMD=dump cargo test --test cli`, and copy `dump/<name>.st
 I/O-error message and the `--version` string).
 
 [`trycmd`]: https://docs.rs/trycmd
+
+## Before you open a pull request
+
+CI runs the same checks you can run locally, so save yourself a round trip and
+run them first — each maps to one command:
+
+```sh
+cargo fmt --check                      # formatting
+cargo clippy --locked --all-features   # lints
+cargo test --locked --release          # unit + CLI tests
+```
+
+The test suite runs across a five-OS matrix (Linux, macOS, and Windows,
+including ARM) in CI, plus a cheatsheet parity check on non-Windows that
+confirms the README table still matches the generated docs and each recipe. If
+your change touches the cheatsheet or its sources, run that check too:
+
+```sh
+cargo build --locked --release
+cargo xtask check --slice ./target/release/slice
+```
+
+Slice's MSRV is **1.85** (`rust-version` in `Cargo.toml`), and a dedicated CI
+job runs `cargo test --locked` against it. Avoid std or language features newer
+than that.
+
+## Changelog
+
+CI requires every PR to update `CHANGELOG.md`. For a user-visible change, add a
+terse entry (one or two lines, one per change) under `[Unreleased]`, following
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The bar is "what does
+the reader gain on upgrade?" — if there's no answer, it doesn't belong.
+
+For changes nobody upgrading needs to know about — internal refactors, CI or
+release-pipeline tweaks, packaging wiring, docs-only edits — skip the entry and
+apply the `skip-changelog` label to the PR instead.
