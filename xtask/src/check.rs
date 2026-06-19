@@ -349,8 +349,6 @@ enum Expect {
     /// Every dialect must report no equivalent (custom delimiter, genuine
     /// strided byte selection).
     Untranslatable,
-    /// Every dialect must report the empty range, and slice must select nothing.
-    Empty,
 }
 
 /// Ranges crossed with every dialect, covering each translate arm: head/tail/
@@ -381,7 +379,11 @@ const TRANSLATE_CASES: &[(&str, Mode, Expect)] = &[
     ("5:+10", Mode::Lines, Expect::Runnable),
     // `+-` window desugar: 5:+-2 -> [3,7) -> `sed -n '4,7p'`, end inside input.
     ("5:+-2", Mode::Lines, Expect::Runnable),
-    ("5:3", Mode::Lines, Expect::Empty),
+    // Empty range: GNU emits the zero-count head (`head -n 0` for lines,
+    // `head -c 0` for bytes; selects nothing); other dialects report no
+    // equivalent and are skipped, like the drop-last forms. A custom delimiter
+    // has no equivalent even when empty.
+    ("5:3", Mode::Lines, Expect::Runnable),
     (":5", Mode::Bytes, Expect::Runnable),
     ("5:15", Mode::Bytes, Expect::Runnable),
     ("5:", Mode::Bytes, Expect::Runnable),
@@ -397,6 +399,7 @@ const TRANSLATE_CASES: &[(&str, Mode, Expect)] = &[
     // `+`/`+-` byte window desugars.
     ("5:+10", Mode::Bytes, Expect::Runnable),
     ("5:+-2", Mode::Bytes, Expect::Runnable),
+    ("5:3", Mode::Bytes, Expect::Runnable),
     ("5:8:2", Mode::Bytes, Expect::Untranslatable),
     ("::2", Mode::Bytes, Expect::Untranslatable),
     (":5", Mode::BytesEmptyDelim, Expect::Runnable),
@@ -404,7 +407,16 @@ const TRANSLATE_CASES: &[(&str, Mode, Expect)] = &[
     ("5:15", Mode::BytesEmptyDelim, Expect::Runnable),
     (":5", Mode::Custom, Expect::Untranslatable),
     ("::2", Mode::Custom, Expect::Untranslatable),
+    ("5:3", Mode::Custom, Expect::Untranslatable),
 ];
+
+/// Ranges that select nothing (start past end). The parity loop above exercises
+/// their `--translate` form where the GNU zero-count head runs (`head -n 0` for
+/// lines, `head -c 0` for bytes), but that leaves the one invariant that
+/// actually matters — slice produces no output — unverified on a non-GNU box
+/// (every other dialect is "no equivalent" and skipped). These are asserted
+/// separately, independent of any dialect or external tool.
+const EMPTY_RANGES: &[(&str, Mode)] = &[("5:3", Mode::Lines), ("5:3", Mode::Bytes)];
 
 // Oracle inputs. `TEXT_TERM` (also the empty-range probe — long enough to
 // expose a non-empty selection) is fully newline-terminated; `TEXT_NOTERM`
@@ -457,23 +469,33 @@ fn check_translate_parity(slice_bin: &PathBuf) -> Result<(), String> {
             targs.push(range.to_owned());
             let out = run_slice(slice_bin, &targs, b"")?;
             let text = String::from_utf8_lossy(&out);
-            let cmd = text.lines().next().unwrap_or("").to_owned();
+            // Single-dialect output is a `# <label>` comment line followed by the
+            // command on the next line; an untranslatable range is the comment
+            // line alone. The command is therefore the first non-comment line.
+            let lines: Vec<&str> = text.lines().collect();
+            let cmd = lines
+                .iter()
+                .find(|l| !l.starts_with('#'))
+                .copied()
+                .unwrap_or("")
+                .to_owned();
 
-            // A leading '#' means no command was emitted (untranslatable or the
-            // empty range). The empty range additionally must slice to nothing,
-            // checked against the full 10-line input.
-            if cmd.starts_with('#') {
+            // No command line means slice reported no equivalent for this
+            // dialect (untranslatable); skip it.
+            if cmd.is_empty() {
                 skip += 1;
-                if expect == Expect::Empty {
-                    let oracle = oracle_run(slice_bin, &flags, range, TEXT_TERM)?;
-                    if !cmd.contains("selects nothing") || !oracle.is_empty() {
-                        return Err(format!(
-                            "[{} {range} {dialect}] expected empty range but got `{cmd}` / slice {oracle:?}",
-                            mode.label()
-                        ));
-                    }
-                }
                 continue;
+            }
+
+            // A translatable result is exactly a `# <label>` line then the
+            // command line; assert that shape so a future format drift fails
+            // loudly here instead of silently picking the wrong line as the
+            // command.
+            if lines.len() != 2 || !lines[0].starts_with("# ") || lines[1].starts_with('#') {
+                return Err(format!(
+                    "[{} {range} {dialect}] unexpected translate output shape: {text:?}",
+                    mode.label()
+                ));
             }
 
             if expect != Expect::Runnable {
@@ -485,15 +507,11 @@ fn check_translate_parity(slice_bin: &PathBuf) -> Result<(), String> {
             emitted_any = true;
 
             // The realized tier can differ from the requested dialect (a posix
-            // request for a byte head becomes `head -c`, tier bsd), and awk can
-            // surface under any dialect (posix `::2` -> awk), so classify from
-            // slice's own output, not the dialect.
+            // request for a byte head becomes `head -c`, tier bsd) and awk can
+            // surface under any dialect (posix `::2` -> awk), so derive the tier
+            // from the command's shape rather than the requested dialect.
             let is_awk = cmd.starts_with("awk");
-            let bucket = if is_awk {
-                "awk".to_owned()
-            } else {
-                parse_tier(&text)
-            };
+            let bucket = if is_awk { "awk" } else { classify_tier(&cmd) };
             for &(label, input, ref oracle) in &oracles {
                 // awk is byte-exact only on terminated, NUL-free text; it never
                 // reaches byte mode (AWK_BYTE_REASON), so this only drops the
@@ -523,7 +541,7 @@ fn check_translate_parity(slice_bin: &PathBuf) -> Result<(), String> {
                         mode.label()
                     ));
                 }
-                match bucket.as_str() {
+                match bucket {
                     "awk" => awk += 1,
                     "bsd" => bsd += 1,
                     "gnu" => gnu += 1,
@@ -536,6 +554,18 @@ fn check_translate_parity(slice_bin: &PathBuf) -> Result<(), String> {
         if expect == Expect::Runnable && !emitted_any {
             return Err(format!(
                 "[{} {range}] expected a translatable command but every dialect reported no equivalent",
+                mode.label()
+            ));
+        }
+    }
+
+    // The empty range's defining property is that it selects nothing; assert it
+    // directly so it holds on every platform, not only where `head -n 0` runs.
+    for &(range, mode) in EMPTY_RANGES {
+        let out = oracle_run(slice_bin, &mode.flags(), range, TEXT_TERM)?;
+        if !out.is_empty() {
+            return Err(format!(
+                "[{} {range}] empty range must select nothing but slice produced {out:?}",
                 mode.label()
             ));
         }
@@ -578,14 +608,26 @@ fn oracle_run(
     run_slice(bin, &args, input)
 }
 
-/// The portability tier slice prints on its `# tier:` line (`posix`/`bsd`/`gnu`),
-/// defaulting to `posix` if absent.
-fn parse_tier(out: &str) -> String {
-    out.lines()
-        .find_map(|l| l.strip_prefix("# tier:"))
-        .and_then(|t| t.split_whitespace().next())
-        .unwrap_or("posix")
-        .to_owned()
+/// The realized portability tier of a translate command, derived from its shape.
+/// This must track every GNU-only spelling `src/range.rs` emits: the drop-last
+/// forms `head -n -N`/`head -c -N` (`translate_lag`), the `sed -n 'F~Sp'` stride
+/// (`translate_unbounded`), and the zero-count empty range `head -n 0`/`head -c 0`
+/// (`empty_candidate`) — POSIX/BSD `head` reject a count of 0. `head -c N` is
+/// BSD+; everything else (`sed -n` ranges, `sed '$d'`, `head -n N`, `tail`, `dd`,
+/// `cat`) is POSIX.
+fn classify_tier(cmd: &str) -> &'static str {
+    if cmd.starts_with("head -n -")
+        || cmd.starts_with("head -c -")
+        || cmd == "head -n 0"
+        || cmd == "head -c 0"
+        || cmd.contains('~')
+    {
+        "gnu"
+    } else if cmd.starts_with("head -c ") {
+        "bsd"
+    } else {
+        "posix"
+    }
 }
 
 /// Inputs the oracle compares against, by mode: byte tools on binary, line

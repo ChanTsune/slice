@@ -1,4 +1,8 @@
-# posix: awk 'NR%2==1'
-# bsd:   awk 'NR%2==1'
-# gnu:   sed -n '1~2p'
-# awk:   awk 'NR%2==1'
+# posix  (awk re-terminates an unterminated final line and may drop bytes after an embedded NUL)
+awk 'NR%2==1'
+# bsd  (awk re-terminates an unterminated final line and may drop bytes after an embedded NUL)
+awk 'NR%2==1'
+# gnu
+sed -n '1~2p'
+# awk  (awk re-terminates an unterminated final line and may drop bytes after an embedded NUL)
+awk 'NR%2==1'

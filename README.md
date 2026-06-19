@@ -209,18 +209,20 @@ command for a range, then exits without reading input — the answer to "I used
 `slice` here, but the box that runs this script doesn't have it":
 
 ```sh
-$ slice --translate 1:5
+$ slice --translate=posix 1:5
+# posix
 sed -n '2,5p'
-# tier: posix
 
-$ slice -b --translate 5:15
+$ slice -b --translate=posix 5:15
+# posix
 dd bs=1 skip=5 count=10 2>/dev/null
-# tier: posix
 ```
 
 Pass an explicit dialect (`posix`/`bsd`/`gnu`/`awk`/`all`) or omit it for the
-platform's native toolset. Each line carries a portability `# tier:`, and ranges
-with no faithful single-command equivalent say so instead of misleading you.
+platform's native toolset. Each command is labelled by dialect
+(`# posix`/`# bsd`/`# gnu`/`# awk`); portability caveats appear inline as
+parenthetical notes; and ranges with no faithful single-command equivalent say
+so instead of misleading you.
 
 ## Shell completions and man page
 
