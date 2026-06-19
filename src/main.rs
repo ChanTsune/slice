@@ -663,6 +663,34 @@ fn regular_len(file: &fs::File) -> Option<u64> {
     (metadata.is_file() && metadata.len() > 0).then_some(metadata.len())
 }
 
+/// Dispatch one input through its plan. The only per-call-site differences are
+/// the `skip` strategy (read-discard on stdin, seek on files) and whether a
+/// `len` is known up front to resolve a deferred plan eagerly — pass `None` for
+/// a stream that can't report its length (so it keeps streaming via
+/// `apply_deferred`).
+fn run<R, W, S>(
+    mode: &SliceMode,
+    input: R,
+    output: W,
+    plan: Plan,
+    skip: S,
+    max_record_size: Option<usize>,
+    len: Option<u64>,
+) -> io::Result<()>
+where
+    R: BufRead,
+    W: Write,
+    S: Fn(&mut R, u64) -> io::Result<()>,
+{
+    match plan {
+        Plan::Resolved(plan) => apply(mode, input, output, plan, skip),
+        Plan::Deferred(deferred) => match len.and_then(|len| deferred.resolve(len)) {
+            Some(plan) => apply(mode, input, output, plan, skip),
+            None => apply_deferred(mode, input, output, deferred, max_record_size),
+        },
+    }
+}
+
 fn entry(args: cli::Args) -> bool {
     if let Some(kind) = args.generate {
         return stdout_status(generate_mode(stdout().lock(), kind));
@@ -701,12 +729,9 @@ fn entry(args: cli::Args) -> bool {
     if args.files.is_empty() {
         let input = buf_reader(stdin().lock(), io_buffer_size);
         let output = buf_writer(stdout().lock(), io_buffer_size);
-        let result = match plan {
-            Plan::Resolved(plan) => apply(&mode, input, output, plan, discard),
-            Plan::Deferred(deferred) => {
-                apply_deferred(&mode, input, output, deferred, max_record_size)
-            }
-        };
+        // stdin can't report a length or seek, so deferred plans stay
+        // streaming (len = None) and skipping is read-and-discard.
+        let result = run(&mode, input, output, plan, discard, max_record_size, None);
         stdout_status(result)
     } else {
         // A single file never gets a header, so -q only matters for 2+ files.
@@ -720,21 +745,13 @@ fn entry(args: cli::Args) -> bool {
             |input: io::BufReader<fs::File>, output| {
                 let seek =
                     |r: &mut io::BufReader<fs::File>, n| r.seek(SeekFrom::Start(n)).map(drop);
-                match plan {
-                    Plan::Resolved(plan) => apply(&mode, input, output, plan, seek),
-                    Plan::Deferred(deferred) => {
-                        // Byte offsets resolve against the file size, rejoining
-                        // the seek/copy fast paths; line/delimiter counts stay
-                        // unknowable up front, so those keep streaming.
-                        let len = matches!(mode, SliceMode::Bytes)
-                            .then(|| regular_len(input.get_ref()))
-                            .flatten();
-                        match len.and_then(|len| deferred.resolve(len)) {
-                            Some(plan) => apply(&mode, input, output, plan, seek),
-                            None => apply_deferred(&mode, input, output, deferred, max_record_size),
-                        }
-                    }
-                }
+                // Byte offsets resolve against the file size, rejoining the
+                // seek/copy fast paths; line/delimiter counts stay unknowable up
+                // front, so those keep streaming.
+                let len = matches!(mode, SliceMode::Bytes)
+                    .then(|| regular_len(input.get_ref()))
+                    .flatten();
+                run(&mode, input, output, plan, seek, max_record_size, len)
             },
         )
     }
@@ -1977,14 +1994,9 @@ mod tests {
                 let plan = SliceRange::from_str(range).unwrap().plan();
                 let apply_with = |mode: &SliceMode| {
                     let mut out = Vec::new();
-                    match plan {
-                        Plan::Resolved(plan) => {
-                            apply(mode, INPUT, &mut out, plan, discard).expect("")
-                        }
-                        Plan::Deferred(deferred) => {
-                            apply_deferred(mode, INPUT, &mut out, deferred, None).expect("")
-                        }
-                    }
+                    // Route through the same dispatcher entry() uses, with the
+                    // stdin-like settings (no length, read-discard skip).
+                    run(mode, INPUT, &mut out, plan, discard, None, None).expect("");
                     out
                 };
                 assert_eq!(
