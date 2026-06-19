@@ -1,0 +1,1 @@
+# no equivalent: no POSIX single command selects an empty range; GNU has `head -n 0`

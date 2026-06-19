@@ -1,0 +1,2 @@
+# bsd  (head -c is not in POSIX; present on BSD and GNU)
+head -c 5

@@ -1,2 +1,2 @@
+# awk  (awk re-terminates an unterminated final line and may drop bytes after an embedded NUL)
 awk 'NR>=2 && NR<=5'
-# tier: posix  (awk re-terminates an unterminated final line and may drop bytes after an embedded NUL)
