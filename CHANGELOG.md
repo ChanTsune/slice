@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`sha256sum -c SHA256SUMS`).
 - Prebuilt binary for RISC-V Linux (`riscv64gc-unknown-linux-musl`); the
   `curl … | sh` installer now resolves RISC-V hosts.
+- Prebuilt binary for FreeBSD (`x86_64-unknown-freebsd`); the
+  `curl … | sh` installer now resolves FreeBSD hosts.
 
 ## [0.5.0] - 2026-06-13
 

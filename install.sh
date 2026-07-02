@@ -22,7 +22,8 @@ have() {
 }
 
 # Map the host to one of the published release target triples. Linux ships musl
-# builds (and a gnueabihf build for 32-bit arm); macOS ships native darwin.
+# builds (and a gnueabihf build for 32-bit arm); macOS and FreeBSD ship native
+# builds.
 detect_target() {
 	os=$(uname -s)
 	arch=$(uname -m)
@@ -41,6 +42,12 @@ detect_target() {
 		x86_64) echo "x86_64-apple-darwin" ;;
 		arm64 | aarch64) echo "aarch64-apple-darwin" ;;
 		*) err "unsupported macOS architecture: $arch" ;;
+		esac
+		;;
+	FreeBSD)
+		case "$arch" in
+		x86_64 | amd64) echo "x86_64-unknown-freebsd" ;;
+		*) err "unsupported FreeBSD architecture: $arch" ;;
 		esac
 		;;
 	*)
