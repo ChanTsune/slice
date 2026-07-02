@@ -1,0 +1,6 @@
+start: 1
+end:   3 (exclusive)
+step:  1
+0-based: characters at indices [1, 3)
+1-based: from the 2nd character to the 3rd character
+count: 2

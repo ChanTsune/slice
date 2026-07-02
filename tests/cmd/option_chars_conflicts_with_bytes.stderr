@@ -1,0 +1,5 @@
+error: the argument '--chars' cannot be used with '--bytes'
+
+Usage: slice[EXE] --chars <RANGE> [FILES]...
+
+For more information, try '--help'.

@@ -17,6 +17,8 @@ Options:
           Slice the lines (default)
   -b, --bytes
           Slice the bytes
+      --chars
+          Slice the UTF-8 characters (code points)
       --delimiter <DELIMITER>
           Slice by delimiter
   -z, --null

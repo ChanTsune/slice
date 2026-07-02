@@ -62,7 +62,7 @@ impl FromStr for MaxRecordSize {
     about,
     author,
     arg_required_else_help = true,
-    group(ArgGroup::new("mode").args(["lines", "bytes", "delimiter", "null"])),
+    group(ArgGroup::new("mode").args(["lines", "bytes", "chars", "delimiter", "null"])),
     // --explain and --translate are both read-and-exit actions handled in
     // precedence order by entry(); group them so clap rejects both at once
     // rather than silently running one. (--generate is `exclusive`, so it
@@ -94,6 +94,10 @@ e.g., '50:+50'"
     // `-c` is a hidden short alias kept for backward compatibility.
     #[arg(short, long, short_alias = 'c', help = "Slice the bytes")]
     pub(crate) bytes: bool,
+    // Long-only: `-c` historically means bytes, so a chars shorthand would
+    // invite the same confusion cut(1) has.
+    #[arg(long, help = "Slice the UTF-8 characters (code points)")]
+    pub(crate) chars: bool,
     #[arg(long, help = "Slice by delimiter")]
     pub(crate) delimiter: Option<String>,
     #[arg(short = 'z', long = "null", help = "Use NUL (\\0) as the delimiter")]
@@ -293,6 +297,22 @@ mod tests {
     fn c_short_alias_sets_bytes() {
         let args = Args::parse_from(["slice", "-c", "0::1", "text.txt"]);
         assert!(args.bytes);
+    }
+
+    #[test]
+    fn chars_flag_parses() {
+        let args = Args::parse_from(["slice", "--chars", "0:5", "text.txt"]);
+        assert!(args.chars);
+        assert_eq!(args.files, vec![PathBuf::from("text.txt")]);
+    }
+
+    #[test]
+    fn chars_conflicts_with_other_modes() {
+        assert!(Args::try_parse_from(["slice", "--chars", "-b", "0:"]).is_err());
+        assert!(Args::try_parse_from(["slice", "--chars", "-c", "0:"]).is_err());
+        assert!(Args::try_parse_from(["slice", "--chars", "-l", "0:"]).is_err());
+        assert!(Args::try_parse_from(["slice", "--chars", "-z", "0:"]).is_err());
+        assert!(Args::try_parse_from(["slice", "--chars", "--delimiter", ",", "0:"]).is_err());
     }
 
     #[test]
