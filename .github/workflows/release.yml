@@ -64,6 +64,7 @@ jobs:
           - linux
           - linux-arm
           - linux-arm64
+          - linux-riscv64
           - macos
           - macos-arm
           - win-msvc
@@ -85,6 +86,11 @@ jobs:
           os: ubuntu-24.04-arm
           rust: stable
           target: aarch64-unknown-linux-musl
+          cross: false
+        - build: linux-riscv64
+          os: ubuntu-24.04-riscv
+          rust: stable
+          target: riscv64gc-unknown-linux-musl
           cross: false
         # macos-15 runners are arm64; x86_64-apple-darwin is a cross-compile
         # through the target added by setup-rust.
@@ -133,9 +139,11 @@ jobs:
       run: |
         cargo install cross
         echo "CARGO=cross" >> $GITHUB_ENV
+    # Native musl targets (aarch64, riscv64) need musl-gcc on the host; the
+    # x86_64 musl build is cross-only, so its cross image supplies it instead.
     - name: Setup musl tools
       shell: bash
-      if: ${{ matrix.target == 'aarch64-unknown-linux-musl' }}
+      if: ${{ !matrix.cross && endsWith(matrix.target, '-linux-musl') }}
       run: sudo apt-get update && sudo apt-get install -y musl-tools
     - name: Setup target flags
       shell: bash

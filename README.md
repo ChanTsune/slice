@@ -42,8 +42,9 @@ choose the install location.
 
 ### Prebuilt binaries
 
-Prebuilt archives for Linux, macOS, and Windows (x86 and ARM) are published on
-the [GitHub Releases](https://github.com/ChanTsune/slice/releases) page; see that
+Prebuilt archives for Linux (x86, ARM, and RISC-V), macOS, and Windows (x86 and
+ARM) are published on the
+[GitHub Releases](https://github.com/ChanTsune/slice/releases) page; see that
 page for the targets covered by the latest release. Each archive bundles shell
 completions (`complete/`) and the man page (`doc/`) alongside the binary.
 

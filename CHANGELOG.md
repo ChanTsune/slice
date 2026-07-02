@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for compatibility.
 - Releases now include a `SHA256SUMS` manifest to verify downloads
   (`sha256sum -c SHA256SUMS`).
+- Prebuilt binary for RISC-V Linux (`riscv64gc-unknown-linux-musl`); the
+  `curl … | sh` installer now resolves RISC-V hosts.
 
 ## [0.5.0] - 2026-06-13
 
