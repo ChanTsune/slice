@@ -1,6 +1,10 @@
 publish = false
 push = false
 tag = false
+# The xtask member makes this a multi-package workspace; a consolidated
+# commit message can't render {{version}} there (versions aren't shared),
+# so commit per package. Only slice-command is released, so it stays one commit.
+consolidate-commits = false
 # The repo's tags have no `v` prefix (release.yml triggers on bare versions).
 tag-name = "{{version}}"
 pre-release-commit-message = ":bookmark: Bump version to {{version}}"
