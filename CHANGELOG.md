@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `--chars` to slice by UTF-8 character (code point), exactly like Python
+  `str` slicing; bytes that are not valid UTF-8 pass through, one character
+  each.
+
 ## [0.6.0] - 2026-07-02
 
 ### Added

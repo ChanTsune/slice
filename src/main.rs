@@ -6,8 +6,9 @@ mod range;
 
 use crate::{
     ext::{
-        read_all_with_record_limit, slice_lag, slice_lag_with_record_limit, slice_stepped,
-        slice_tail, slice_tail_with_record_limit, slice_window, Byte, Bytes,
+        char_lag, char_stepped, char_tail, char_window, read_all_with_record_limit, slice_lag,
+        slice_lag_with_record_limit, slice_stepped, slice_tail, slice_tail_with_record_limit,
+        slice_window, Byte, Bytes, Utf8Elements,
     },
     range::{DeferredPlan, Plan, ReversePlan, SliceIndex, SlicePlan, SliceRange},
 };
@@ -20,11 +21,14 @@ use std::{
     process::ExitCode,
 };
 
-const WRITE_BUF_SIZE: usize = 8 * 1024;
+pub(crate) const WRITE_BUF_SIZE: usize = 8 * 1024;
 
 enum SliceMode<'b> {
     Lines,
     Bytes,
+    /// UTF-8 characters (Unicode scalar values); a byte that starts no valid
+    /// sequence is one element of its own, so any input splits losslessly.
+    Chars,
     /// Non-empty by construction: `slice_mode` folds the empty delimiter into
     /// `Bytes`, so the delimiter drivers never see an empty shape.
     Custom(&'b [u8]),
@@ -33,10 +37,14 @@ enum SliceMode<'b> {
 /// Classify the slicing mode from the resolved flags. An empty `--delimiter`
 /// splits one byte per chunk — identical to byte mode under every plan — so it
 /// is normalized to `Bytes` here, reaching the seek/copy byte fast paths.
+/// `bytes`/`chars`/`delimiter` are mutually exclusive (clap's ArgGroup).
 #[inline]
-fn slice_mode(bytes: bool, delimiter: Option<&[u8]>) -> SliceMode<'_> {
+fn slice_mode(bytes: bool, chars: bool, delimiter: Option<&[u8]>) -> SliceMode<'_> {
     if bytes {
         return SliceMode::Bytes;
+    }
+    if chars {
+        return SliceMode::Chars;
     }
     match delimiter {
         Some([]) => SliceMode::Bytes,
@@ -54,6 +62,7 @@ impl From<&SliceMode<'_>> for range::TranslateMode {
         match mode {
             SliceMode::Lines => range::TranslateMode::Lines,
             SliceMode::Bytes => range::TranslateMode::Bytes,
+            SliceMode::Chars => range::TranslateMode::Chars,
             SliceMode::Custom(_) => range::TranslateMode::Custom,
         }
     }
@@ -280,11 +289,13 @@ where
         SlicePlan::Window { start, end } => match mode {
             SliceMode::Lines => slice_window(Byte(b'\n'), input, output, start, end),
             SliceMode::Bytes => byte_window(input, output, start, end, skip),
+            SliceMode::Chars => char_window(input, output, start, end),
             SliceMode::Custom(delimiter) => delimit_window(input, output, delimiter, start, end),
         },
         SlicePlan::Stepped { start, end, step } => match mode {
             SliceMode::Lines => slice_stepped(Byte(b'\n'), input, output, start, end, step),
             SliceMode::Bytes => byte_mode(input, output, start, end, step),
+            SliceMode::Chars => char_stepped(input, output, start, end, step),
             SliceMode::Custom(delimiter) => {
                 delimit_stepped(input, output, delimiter, start, end, step)
             }
@@ -568,6 +579,9 @@ fn apply_deferred<R: BufRead, W: Write>(
             ),
             SliceMode::Lines => slice_tail(Byte(b'\n'), input, output, back, end, step),
             SliceMode::Bytes => byte_tail(input, output, back, end, step),
+            // An element is at most 4 bytes, so the record limit is meaningless
+            // here, like byte mode.
+            SliceMode::Chars => char_tail(input, output, back, end, step),
             SliceMode::Custom(delimiter) => {
                 delimit_tail(input, output, delimiter, back, end, step, max_record_size)
             }
@@ -584,6 +598,7 @@ fn apply_deferred<R: BufRead, W: Write>(
             ),
             SliceMode::Lines => slice_lag(Byte(b'\n'), input, output, start, back, step),
             SliceMode::Bytes => byte_lag(input, output, start, back, step),
+            SliceMode::Chars => char_lag(input, output, start, back, step),
             SliceMode::Custom(delimiter) => {
                 delimit_lag(input, output, delimiter, start, back, step, max_record_size)
             }
@@ -624,9 +639,27 @@ fn apply_reverse<R: BufRead, W: Write>(
     match mode {
         SliceMode::Bytes => reverse_bytes(&data, &mut output, plan)?,
         SliceMode::Lines => reverse_chunks(&data, &mut output, b"\n", plan)?,
+        SliceMode::Chars => reverse_chars(&data, &mut output, plan)?,
         SliceMode::Custom(delimiter) => reverse_chunks(&data, &mut output, delimiter, plan)?,
     }
     output.flush()
+}
+
+/// Chars carry no delimiter to re-attach, so emission is a plain descending
+/// walk over the element spans.
+fn reverse_chars<W: Write>(data: &[u8], output: &mut W, plan: ReversePlan) -> io::Result<()> {
+    let mut starts = Vec::new();
+    let mut pos = 0;
+    for element in Utf8Elements::new(data) {
+        starts.push(pos);
+        pos += element.len();
+    }
+    starts.push(data.len());
+    let count = starts.len() - 1;
+    for i in plan.indices(count) {
+        output.write_all(&data[starts[i]..starts[i + 1]])?;
+    }
+    Ok(())
 }
 
 fn reverse_bytes<W: Write>(data: &[u8], output: &mut W, plan: ReversePlan) -> io::Result<()> {
@@ -771,10 +804,11 @@ fn entry(args: cli::Args) -> bool {
     // dispatch, so the empty delimiter (folded to Bytes by slice_mode) is
     // treated identically by all three — never a "part"/Custom on one path and
     // a byte on another.
-    let mode = slice_mode(args.bytes, delimiter.as_deref());
+    let mode = slice_mode(args.bytes, args.chars, delimiter.as_deref());
     if args.explain {
         let unit = match mode {
             SliceMode::Bytes => "byte",
+            SliceMode::Chars => "character",
             SliceMode::Custom(_) => "part",
             SliceMode::Lines => "line",
         };
@@ -886,19 +920,23 @@ mod tests {
         #[test]
         fn mirrors_slice_mode_including_empty_delimiter() {
             assert_eq!(
-                TranslateMode::from(&slice_mode(true, None)),
+                TranslateMode::from(&slice_mode(true, false, None)),
                 TranslateMode::Bytes
             );
             assert_eq!(
-                TranslateMode::from(&slice_mode(false, None)),
+                TranslateMode::from(&slice_mode(false, false, None)),
                 TranslateMode::Lines
             );
             assert_eq!(
-                TranslateMode::from(&slice_mode(false, Some(&b","[..]))),
+                TranslateMode::from(&slice_mode(false, true, None)),
+                TranslateMode::Chars
+            );
+            assert_eq!(
+                TranslateMode::from(&slice_mode(false, false, Some(&b","[..]))),
                 TranslateMode::Custom
             );
             assert_eq!(
-                TranslateMode::from(&slice_mode(false, Some(&b""[..]))),
+                TranslateMode::from(&slice_mode(false, false, Some(&b""[..]))),
                 TranslateMode::Bytes
             );
         }
@@ -1331,6 +1369,110 @@ mod tests {
             )
             .expect_err("a broken pipe must propagate from byte_tail");
             assert!(is_broken_pipe(&err));
+        }
+    }
+
+    mod chars {
+        use super::*;
+
+        // Drive the same entry-level dispatch a real run takes, so every plan
+        // kind is exercised against the chars mode. Small capacities straddle
+        // multi-byte elements across fill_buf boundaries inside the drivers,
+        // where pending bytes carry across skip_n/read_to alternation.
+        fn sliced(input: &[u8], range: &str) -> Vec<u8> {
+            let range = SliceRange::from_str(range).unwrap();
+            let mut outputs = [1, 2, 3, 8192].into_iter().map(|capacity| {
+                let reader = io::BufReader::with_capacity(capacity, input);
+                let mut out = Vec::new();
+                match range.plan() {
+                    Plan::Resolved(plan) => {
+                        apply(&SliceMode::Chars, reader, &mut out, plan, discard)
+                    }
+                    Plan::Deferred(deferred) => {
+                        apply_deferred(&SliceMode::Chars, reader, &mut out, deferred, None)
+                    }
+                    Plan::Reverse(reverse) => {
+                        apply_reverse(&SliceMode::Chars, reader, &mut out, reverse, None)
+                    }
+                }
+                .expect("");
+                out
+            });
+            let first = outputs.next().unwrap();
+            assert!(
+                outputs.all(|out| out == first),
+                "every capacity must produce the same slice"
+            );
+            first
+        }
+
+        const KANA: &[u8] = "あいうえお".as_bytes();
+
+        #[test]
+        fn window() {
+            assert_eq!(sliced(KANA, "1:3"), "いう".as_bytes());
+        }
+
+        #[test]
+        fn unbounded_window() {
+            assert_eq!(sliced(KANA, "2:"), "うえお".as_bytes());
+        }
+
+        #[test]
+        fn stepped() {
+            assert_eq!(sliced(KANA, "::2"), "あうお".as_bytes());
+        }
+
+        #[test]
+        fn tail() {
+            assert_eq!(sliced(KANA, "-2:"), "えお".as_bytes());
+        }
+
+        #[test]
+        fn lag() {
+            assert_eq!(sliced(KANA, ":-2"), "あいう".as_bytes());
+        }
+
+        #[test]
+        fn reverse() {
+            assert_eq!(sliced(KANA, "::-1"), "おえういあ".as_bytes());
+        }
+
+        #[test]
+        fn reverse_window_stepped() {
+            assert_eq!(sliced(KANA, "3:0:-2"), "えい".as_bytes());
+        }
+
+        #[test]
+        fn four_byte_emoji_is_one_character() {
+            assert_eq!(sliced("a🍣b".as_bytes(), "1:2"), "🍣".as_bytes());
+        }
+
+        #[test]
+        fn copy_round_trips_and_empty_selects_nothing() {
+            let input = [0xFF, 0xE3, 0x81, 0x82, 0x80];
+            assert_eq!(sliced(&input, "::"), input);
+            assert_eq!(sliced(&input, ":0"), b"");
+        }
+
+        #[test]
+        fn invalid_bytes_are_single_elements() {
+            // FF, あ, 80 — three elements.
+            let input = [0xFF, 0xE3, 0x81, 0x82, 0x80];
+            assert_eq!(sliced(&input, "1:2"), "あ".as_bytes());
+            assert_eq!(sliced(&input, "::2"), [0xFF, 0x80]);
+            assert_eq!(sliced(&input, "::-1"), [0x80, 0xE3, 0x81, 0x82, 0xFF]);
+        }
+
+        // The straddled bytes consumed past the skipped prefix must reach the
+        // unbounded window's copy tail.
+        #[test]
+        fn unbounded_window_flushes_straddled_bytes() {
+            let data: &[u8] = &[0xF0, 0x90, 0x41, 0x42];
+            let reader = io::BufReader::with_capacity(2, data);
+            let mut out = Vec::new();
+            char_window(reader, &mut out, 1, None).expect("");
+            assert_eq!(out, [0x90, 0x41, 0x42]);
         }
     }
 
@@ -2150,8 +2292,8 @@ mod tests {
                     out
                 };
                 assert_eq!(
-                    apply_with(&slice_mode(false, Some(b""))),
-                    apply_with(&slice_mode(true, None)),
+                    apply_with(&slice_mode(false, false, Some(b""))),
+                    apply_with(&slice_mode(true, false, None)),
                     "empty delimiter diverged from byte mode for {range}"
                 );
             }
@@ -2159,11 +2301,15 @@ mod tests {
 
         #[test]
         fn classification() {
-            assert!(matches!(slice_mode(false, None), SliceMode::Lines));
-            assert!(matches!(slice_mode(true, None), SliceMode::Bytes));
-            assert!(matches!(slice_mode(false, Some(b"")), SliceMode::Bytes));
+            assert!(matches!(slice_mode(false, false, None), SliceMode::Lines));
+            assert!(matches!(slice_mode(true, false, None), SliceMode::Bytes));
+            assert!(matches!(slice_mode(false, true, None), SliceMode::Chars));
             assert!(matches!(
-                slice_mode(false, Some(b",")),
+                slice_mode(false, false, Some(b"")),
+                SliceMode::Bytes
+            ));
+            assert!(matches!(
+                slice_mode(false, false, Some(b",")),
                 SliceMode::Custom(b",")
             ));
         }

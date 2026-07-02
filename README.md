@@ -198,6 +198,16 @@ backslash escapes in the delimiter: `\t`, `\n`, `\r`, `\0`, `\\`, and `\xHH`
 (an arbitrary byte, e.g. `\xff`). This command slices the first three
 tab-separated fields.
 
+```sh
+slice --chars 0:5 file.txt
+```
+
+With `--chars`, elements are UTF-8 characters (code points), exactly like
+Python `str` slicing — `slice --chars ::-1` reverses text the way `s[::-1]`
+does. Bytes that are not valid UTF-8 pass through unchanged, counted as one
+character each, so arbitrary data never fails. As in Python, an emoji composed
+of multiple code points counts as several characters, not one visible glyph.
+
 For more details, run:
 
 ```sh

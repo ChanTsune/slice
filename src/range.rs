@@ -65,6 +65,7 @@ pub(crate) struct SliceRange {
 pub(crate) enum TranslateMode {
     Lines,
     Bytes,
+    Chars,
     Custom,
 }
 
@@ -743,6 +744,8 @@ fn explain_reverse(start: SliceIndex, end: Option<SliceIndex>, step: usize, unit
 type Translation = (String, Option<&'static str>);
 
 const CUSTOM_REASON: &str = "no standard tool selects records by a custom delimiter";
+const CHARS_REASON: &str =
+    "cut -c is per-line (and selects bytes on GNU), not a stream character slice";
 const STEP_BYTE_REASON: &str = "strided byte selection has no standard-tool equivalent";
 const AWK_BYTE_REASON: &str = "awk operates on lines, not byte offsets";
 const AWK_NEWLINE_NOTE: &str =
@@ -812,6 +815,7 @@ fn render_result(label: &str, candidate: Result<Translation, &'static str>) -> S
 fn empty_candidate(mode: TranslateMode, dialect: Dialect) -> Result<Translation, &'static str> {
     match mode {
         TranslateMode::Custom => Err(CUSTOM_REASON),
+        TranslateMode::Chars => Err(CHARS_REASON),
         TranslateMode::Lines => match dialect {
             Dialect::Gnu => Ok(("head -n 0".to_owned(), None)),
             _ => Err(EMPTY_RANGE_LINES_REASON),
@@ -847,6 +851,7 @@ fn translate_unbounded(
 ) -> Result<Translation, &'static str> {
     match mode {
         TranslateMode::Custom => return Err(CUSTOM_REASON),
+        TranslateMode::Chars => return Err(CHARS_REASON),
         TranslateMode::Bytes if step > 1 => return Err(STEP_BYTE_REASON),
         _ => {}
     }
@@ -864,7 +869,7 @@ fn translate_unbounded(
                 Dialect::Awk => Err(AWK_BYTE_REASON),
                 _ => Ok((format!("tail -c +{first}"), None)),
             },
-            TranslateMode::Custom => unreachable!(),
+            TranslateMode::Chars | TranslateMode::Custom => unreachable!(),
         }
     } else {
         // Unbounded stepped: lines only (byte and custom errored above).
@@ -887,6 +892,9 @@ fn translate_bounded(
 ) -> Result<Translation, &'static str> {
     if mode == TranslateMode::Custom {
         return Err(CUSTOM_REASON);
+    }
+    if mode == TranslateMode::Chars {
+        return Err(CHARS_REASON);
     }
     // A byte step matters only if a second selected byte falls within
     // [start, end); when it does not (`end - start <= step`), the range picks
@@ -934,7 +942,7 @@ fn translate_bounded(
                 )),
             }
         }
-        TranslateMode::Custom => unreachable!(),
+        TranslateMode::Chars | TranslateMode::Custom => unreachable!(),
     }
 }
 
@@ -949,6 +957,9 @@ fn translate_lag(
 ) -> Result<Translation, &'static str> {
     if mode == TranslateMode::Custom {
         return Err(CUSTOM_REASON);
+    }
+    if mode == TranslateMode::Chars {
+        return Err(CHARS_REASON);
     }
     if start > 0 {
         return Err(LAG_START_REASON);
@@ -970,7 +981,7 @@ fn translate_lag(
             Dialect::Gnu => Ok((format!("head -c -{back}"), None)),
             _ => Err(DROP_LAST_BYTES_REASON),
         },
-        TranslateMode::Custom => unreachable!(),
+        TranslateMode::Chars | TranslateMode::Custom => unreachable!(),
     }
 }
 
@@ -988,6 +999,7 @@ fn translate_reverse(
 ) -> Result<Translation, &'static str> {
     match mode {
         TranslateMode::Custom => return Err(CUSTOM_REASON),
+        TranslateMode::Chars => return Err(CHARS_REASON),
         TranslateMode::Bytes => return Err(REVERSE_BYTES_REASON),
         TranslateMode::Lines => {}
     }
@@ -1019,6 +1031,9 @@ fn translate_tail(
     if mode == TranslateMode::Custom {
         return Err(CUSTOM_REASON);
     }
+    if mode == TranslateMode::Chars {
+        return Err(CHARS_REASON);
+    }
     if step > 1 {
         return Err(TAIL_STEP_REASON);
     }
@@ -1035,7 +1050,7 @@ fn translate_tail(
             Dialect::Awk => Err(AWK_BYTE_REASON),
             _ => Ok((format!("tail -c {back}"), None)),
         },
-        TranslateMode::Custom => unreachable!(),
+        TranslateMode::Chars | TranslateMode::Custom => unreachable!(),
     }
 }
 
@@ -1999,7 +2014,7 @@ mod tests {
     mod translate {
         use super::*;
         use TranslateDialect::{All, Awk, Bsd, Gnu, Posix};
-        use TranslateMode::{Bytes, Custom, Lines};
+        use TranslateMode::{Bytes, Chars, Custom, Lines};
 
         fn tr(range: &str, mode: TranslateMode, dialect: TranslateDialect) -> String {
             SliceRange::from_str(range)
@@ -2011,6 +2026,21 @@ mod tests {
         fn whole_input_is_cat() {
             assert_eq!(tr(":", Lines, Posix), "# posix\ncat\n");
             assert_eq!(tr("0::1", Bytes, Posix), "# posix\ncat\n");
+        }
+
+        // Chars mirror Custom: Copy stays cat (the whole input passes through
+        // in every mode); every selecting or empty form has no equivalent.
+        #[test]
+        fn chars_have_no_single_command_equivalent() {
+            assert_eq!(tr(":", Chars, Posix), "# posix\ncat\n");
+            for range in ["1:5", "5:", "-3:", ":-2", "::2", "::-1", "5:3"] {
+                assert_eq!(
+                    tr(range, Chars, Gnu),
+                    "# no equivalent: cut -c is per-line (and selects bytes on GNU), \
+                     not a stream character slice\n",
+                    "range {range}"
+                );
+            }
         }
 
         #[test]

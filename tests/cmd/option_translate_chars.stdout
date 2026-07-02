@@ -1,0 +1,1 @@
+# no equivalent: cut -c is per-line (and selects bytes on GNU), not a stream character slice
