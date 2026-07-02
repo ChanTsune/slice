@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-02
+
 ### Added
 
 - Negative `step` values, exactly like Python: `::-1` reverses the input, so
@@ -174,7 +176,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   headers when multiple files are given.
 
 <!-- next-url -->
-[Unreleased]: https://github.com/ChanTsune/slice/compare/0.5.0...HEAD
+[Unreleased]: https://github.com/ChanTsune/slice/compare/0.6.0...HEAD
+[0.6.0]: https://github.com/ChanTsune/slice/compare/0.5.0...0.6.0
 [0.5.0]: https://github.com/ChanTsune/slice/compare/0.4.3...0.5.0
 [0.4.3]: https://github.com/ChanTsune/slice/compare/0.4.2...0.4.3
 [0.4.2]: https://github.com/ChanTsune/slice/compare/0.4.1...0.4.2
