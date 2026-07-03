@@ -69,18 +69,18 @@ impl From<&SliceMode<'_>> for range::TranslateMode {
 }
 
 #[inline]
-fn buf_reader<R: Read>(reader: R, capacity: Option<usize>) -> io::BufReader<R> {
+fn buf_reader<R: Read>(reader: R, capacity: Option<NonZeroUsize>) -> io::BufReader<R> {
     if let Some(capacity) = capacity {
-        io::BufReader::with_capacity(capacity, reader)
+        io::BufReader::with_capacity(capacity.get(), reader)
     } else {
         io::BufReader::new(reader)
     }
 }
 
 #[inline]
-fn buf_writer<W: Write>(writer: W, capacity: Option<usize>) -> io::BufWriter<W> {
+fn buf_writer<W: Write>(writer: W, capacity: Option<NonZeroUsize>) -> io::BufWriter<W> {
     if let Some(capacity) = capacity {
-        io::BufWriter::with_capacity(capacity, writer)
+        io::BufWriter::with_capacity(capacity.get(), writer)
     } else {
         io::BufWriter::new(writer)
     }
@@ -618,8 +618,8 @@ fn apply_reverse<R: BufRead, W: Write>(
     plan: ReversePlan,
     max_record_size: Option<usize>,
 ) -> io::Result<()> {
-    // The record limit is a line/delimiter concept: byte mode ignores it,
-    // like the tail-relative byte paths.
+    // The record limit is a line/delimiter concept: byte and char modes
+    // ignore it, like their tail-relative paths.
     let data = match (mode, max_record_size) {
         (SliceMode::Lines, Some(_)) => {
             read_all_with_record_limit(Byte(b'\n'), input, max_record_size)?
@@ -846,8 +846,8 @@ fn entry(args: cli::Args) -> bool {
                     Plan::Resolved(plan) => apply(&mode, input, output, plan, seek),
                     Plan::Deferred(deferred) => {
                         // Byte offsets resolve against the file size, rejoining
-                        // the seek/copy fast paths; line/delimiter counts stay
-                        // unknowable up front, so those keep streaming.
+                        // the seek/copy fast paths; line/char/delimiter counts
+                        // stay unknowable up front, so those keep streaming.
                         let len = matches!(mode, SliceMode::Bytes)
                             .then(|| regular_len(input.get_ref()))
                             .flatten();

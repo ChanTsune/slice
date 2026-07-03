@@ -1,7 +1,7 @@
 use crate::range::{SliceRange, TranslateDialect};
 use bytesize::ByteSize;
 use clap::{ArgGroup, Parser, ValueEnum};
-use std::{path::PathBuf, str::FromStr};
+use std::{num::NonZeroUsize, path::PathBuf, str::FromStr};
 
 // `CompletePowershell` (not `CompletePowerShell`) so the kebab-cased value is
 // `complete-powershell` rather than `complete-power-shell`.
@@ -15,19 +15,18 @@ pub(crate) enum Generate {
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
-pub struct NonZeroByteSize(ByteSize);
+pub struct NonZeroByteSize(NonZeroUsize);
 
 impl FromStr for NonZeroByteSize {
-    type Err = <ByteSize as FromStr>::Err;
+    type Err = String;
 
     #[inline]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let bs = ByteSize::from_str(s)?;
-        if bs.0 == 0 {
-            Err(Self::Err::from("0 is not allowed"))
-        } else {
-            Ok(Self(bs))
-        }
+        let bs = ByteSize::from_str(s).map_err(|err| err.to_string())?;
+        let size =
+            usize::try_from(bs.0).map_err(|_| "size is too large for this platform".to_owned())?;
+        let size = NonZeroUsize::new(size).ok_or_else(|| "0 is not allowed".to_owned())?;
+        Ok(Self(size))
     }
 }
 
@@ -180,8 +179,8 @@ e.g., '50:+50'"
 
 impl Args {
     #[inline]
-    pub(crate) fn io_buffer_size(&self) -> Option<usize> {
-        self.io_buffer_size.map(|it| it.0.as_u64() as usize)
+    pub(crate) fn io_buffer_size(&self) -> Option<NonZeroUsize> {
+        self.io_buffer_size.map(|it| it.0)
     }
 
     #[inline]
