@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `str` slicing; bytes that are not valid UTF-8 pass through, one character
   each.
 
+### Fixed
+
+- `--io-buffer-size` values too large for the platform are now rejected with an
+  error instead of being silently truncated (affected 32-bit targets).
+
 ## [0.6.0] - 2026-07-02
 
 ### Added
