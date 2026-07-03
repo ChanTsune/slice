@@ -203,6 +203,10 @@ jobs:
     name: checksums
     needs: ['create-release', 'build-release']
     runs-on: ubuntu-latest
+    # This job doesn't check out the repo, so gh can't infer the target from a
+    # git remote; name it explicitly instead.
+    env:
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Download release archives
         shell: bash
