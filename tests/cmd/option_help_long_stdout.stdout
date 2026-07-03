@@ -19,6 +19,8 @@ Options:
           Slice the bytes
       --chars
           Slice the UTF-8 characters (code points)
+      --graphemes
+          Slice the user-perceived characters (grapheme clusters)
       --delimiter <DELIMITER>
           Slice by delimiter
   -z, --null
@@ -36,7 +38,7 @@ Options:
       --io-buffer-size <IO_BUFFER_SIZE>
           Set the size of the I/O buffer. This buffer is used for both input and output operations (experimental)
       --max-record-size <SIZE|unlimited>
-          Maximum bytes retained for one line/custom-delimited record in tail-relative and reverse ranges. Defaults to unlimited
+          Maximum bytes retained for one line, custom-delimited record, or grapheme cluster in tail-relative and reverse ranges. Defaults to unlimited
   -h, --help
           Print help
   -V, --version

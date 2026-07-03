@@ -1,1 +1,1 @@
-slice: record exceeds --max-record-size=3 bytes in line/custom delimiter mode; use --max-record-size=unlimited to allow larger records
+slice: record exceeds --max-record-size=3 bytes in line/delimiter/grapheme mode; use --max-record-size=unlimited to allow larger records

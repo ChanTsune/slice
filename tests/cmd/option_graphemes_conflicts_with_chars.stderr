@@ -1,0 +1,5 @@
+error: the argument '--graphemes' cannot be used with '--chars'
+
+Usage: slice[EXE] --graphemes <RANGE> [FILES]...
+
+For more information, try '--help'.

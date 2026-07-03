@@ -80,17 +80,17 @@ impl<'a> Iterator for Utf8Elements<'a> {
 }
 
 /// One buffered element: a UTF-8 sequence or a single invalid byte, so at
-/// most 4 bytes — the tail/lag structures hold these inline instead of
-/// allocating a heap buffer per element.
+/// most 4 bytes — callers hold these inline instead of allocating a heap
+/// buffer per element.
 #[derive(Clone, Copy)]
-struct Elem {
+pub(super) struct Elem {
     bytes: [u8; 4],
     len: u8,
 }
 
 impl Elem {
     #[inline]
-    fn new(element: &[u8]) -> Self {
+    pub(super) fn new(element: &[u8]) -> Self {
         let mut bytes = [0; 4];
         bytes[..element.len()].copy_from_slice(element);
         Self {
@@ -100,7 +100,7 @@ impl Elem {
     }
 
     #[inline]
-    fn as_slice(&self) -> &[u8] {
+    pub(super) fn as_slice(&self) -> &[u8] {
         &self.bytes[..self.len as usize]
     }
 }
@@ -117,12 +117,13 @@ fn write_batched<W: Write>(buf: &mut Vec<u8>, element: &[u8], output: &mut W) ->
     Ok(())
 }
 
-/// Streaming scanner behind the `char_*` drivers. A sequence can straddle a
-/// `fill_buf` boundary and `BufRead` cannot un-consume, so bytes read past a
-/// block edge before the element was decided wait in `pending` — e.g. a block
-/// ending in `F0 90` followed by `41` splits into the elements `F0`, `90`,
-/// `41`, of which only `F0` belongs to the element being resolved.
-struct Scanner {
+/// Streaming scanner behind the `char_*` drivers and the graphemes split. A
+/// sequence can straddle a `fill_buf` boundary and `BufRead` cannot
+/// un-consume, so bytes read past a block edge before the element was decided
+/// wait in `pending` — e.g. a block ending in `F0 90` followed by `41` splits
+/// into the elements `F0`, `90`, `41`, of which only `F0` belongs to the
+/// element being resolved.
+pub(super) struct Scanner {
     pending: [u8; 4],
     pending_len: u8,
 }
@@ -139,7 +140,7 @@ enum Step {
 
 impl Scanner {
     #[inline]
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             pending: [0; 4],
             pending_len: 0,
@@ -169,11 +170,14 @@ impl Scanner {
         self.pending_len = (len - n) as u8;
     }
 
-    /// Resolve and consume one element, feeding its bytes to `sink`. Returns
-    /// the element's byte length; `Ok(0)` only at true end of stream (EOF and
-    /// nothing pending). The straddle-aware slow path: the block walks below
-    /// fall back to it whenever `pending` is non-empty.
-    fn next_element<R: BufRead + ?Sized>(
+    /// Resolve and consume one element, feeding its bytes to `sink` — at most
+    /// one call, always the whole element (unlike the fragment-wise delimiter
+    /// scanners); the graphemes split captures the element through an
+    /// out-parameter closure and relies on this. Returns the element's byte
+    /// length; `Ok(0)` only at true end of stream (EOF and nothing pending).
+    /// The straddle-aware slow path: the block walks below fall back to it
+    /// whenever `pending` is non-empty.
+    pub(super) fn next_element<R: BufRead + ?Sized>(
         &mut self,
         r: &mut R,
         mut sink: impl FnMut(&[u8]) -> io::Result<()>,
@@ -248,7 +252,7 @@ impl Scanner {
     /// Visit every element in stream order until `visit` returns `false` or
     /// the stream ends. Each block is bulk-validated once with `from_utf8`,
     /// so a visit costs no per-element re-decode.
-    fn for_each<R: BufRead>(
+    pub(super) fn for_each<R: BufRead + ?Sized>(
         &mut self,
         r: &mut R,
         mut visit: impl FnMut(&[u8]) -> io::Result<bool>,
@@ -323,7 +327,7 @@ impl Scanner {
     /// in whole-block spans; returns the number advanced (fewer means end of
     /// stream). A discarding sink makes this a bulk skip, a writing sink a
     /// bulk copy.
-    fn advance<R: BufRead>(
+    fn advance<R: BufRead + ?Sized>(
         &mut self,
         r: &mut R,
         n: usize,
@@ -396,7 +400,11 @@ impl Scanner {
 
     /// Emit everything not yet consumed verbatim: any straddle-consumed bytes
     /// first, then the reader's remainder via `io::copy`.
-    fn copy_rest<R: BufRead, W: Write>(&mut self, r: &mut R, w: &mut W) -> io::Result<u64> {
+    pub(super) fn copy_rest<R: BufRead + ?Sized, W: Write + ?Sized>(
+        &mut self,
+        r: &mut R,
+        w: &mut W,
+    ) -> io::Result<u64> {
         let carried = self.pending_len as u64;
         w.write_all(self.pending())?;
         self.pending_len = 0;

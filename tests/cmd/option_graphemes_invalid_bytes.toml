@@ -1,0 +1,4 @@
+bin.name = "slice"
+args = ["--graphemes", "::2"]
+status.code = 0
+binary = true

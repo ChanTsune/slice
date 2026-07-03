@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--chars` to slice by UTF-8 character (code point), exactly like Python
   `str` slicing; bytes that are not valid UTF-8 pass through, one character
   each.
+- `--graphemes` to slice by user-perceived character (Unicode extended
+  grapheme cluster), so emoji and combining sequences count as one element;
+  invalid bytes pass through, one element each.
 
 ### Fixed
 
