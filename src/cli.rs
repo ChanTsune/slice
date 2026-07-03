@@ -61,7 +61,7 @@ impl FromStr for MaxRecordSize {
     about,
     author,
     arg_required_else_help = true,
-    group(ArgGroup::new("mode").args(["lines", "bytes", "chars", "delimiter", "null"])),
+    group(ArgGroup::new("mode").args(["lines", "bytes", "chars", "graphemes", "delimiter", "null"])),
     // --explain and --translate are both read-and-exit actions handled in
     // precedence order by entry(); group them so clap rejects both at once
     // rather than silently running one. (--generate is `exclusive`, so it
@@ -97,6 +97,8 @@ e.g., '50:+50'"
     // invite the same confusion cut(1) has.
     #[arg(long, help = "Slice the UTF-8 characters (code points)")]
     pub(crate) chars: bool,
+    #[arg(long, help = "Slice the user-perceived characters (grapheme clusters)")]
+    pub(crate) graphemes: bool,
     #[arg(long, help = "Slice by delimiter")]
     pub(crate) delimiter: Option<String>,
     #[arg(short = 'z', long = "null", help = "Use NUL (\\0) as the delimiter")]
@@ -170,7 +172,7 @@ e.g., '50:+50'"
     #[arg(
         long,
         value_name = "SIZE|unlimited",
-        help = "Maximum bytes retained for one line/custom-delimited record in tail-relative and reverse ranges. Defaults to unlimited"
+        help = "Maximum bytes retained for one line, custom-delimited record, or grapheme cluster in tail-relative and reverse ranges. Defaults to unlimited"
     )]
     pub(crate) max_record_size: Option<MaxRecordSize>,
     #[arg(help = "Target files. if not provided use stdin")]
@@ -312,6 +314,23 @@ mod tests {
         assert!(Args::try_parse_from(["slice", "--chars", "-l", "0:"]).is_err());
         assert!(Args::try_parse_from(["slice", "--chars", "-z", "0:"]).is_err());
         assert!(Args::try_parse_from(["slice", "--chars", "--delimiter", ",", "0:"]).is_err());
+    }
+
+    #[test]
+    fn graphemes_flag_parses() {
+        let args = Args::parse_from(["slice", "--graphemes", "0:5", "text.txt"]);
+        assert!(args.graphemes);
+        assert_eq!(args.files, vec![PathBuf::from("text.txt")]);
+    }
+
+    #[test]
+    fn graphemes_conflicts_with_other_modes() {
+        assert!(Args::try_parse_from(["slice", "--graphemes", "-b", "0:"]).is_err());
+        assert!(Args::try_parse_from(["slice", "--graphemes", "-c", "0:"]).is_err());
+        assert!(Args::try_parse_from(["slice", "--graphemes", "-l", "0:"]).is_err());
+        assert!(Args::try_parse_from(["slice", "--graphemes", "-z", "0:"]).is_err());
+        assert!(Args::try_parse_from(["slice", "--graphemes", "--chars", "0:"]).is_err());
+        assert!(Args::try_parse_from(["slice", "--graphemes", "--delimiter", ",", "0:"]).is_err());
     }
 
     #[test]

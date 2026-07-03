@@ -208,6 +208,15 @@ does. Bytes that are not valid UTF-8 pass through unchanged, counted as one
 character each, so arbitrary data never fails. As in Python, an emoji composed
 of multiple code points counts as several characters, not one visible glyph.
 
+```sh
+slice --graphemes 0:5 file.txt
+```
+
+`--graphemes` slices by user-perceived character (Unicode extended grapheme
+cluster) instead: 👨‍👩‍👧 is five elements under `--chars` but one here, and
+`\r\n` counts as one. Invalid bytes pass through the same way, one element
+each.
+
 For more details, run:
 
 ```sh

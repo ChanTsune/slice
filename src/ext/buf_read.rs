@@ -16,7 +16,7 @@ impl fmt::Display for RecordSizeLimitExceeded {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "record exceeds --max-record-size={} bytes in line/custom delimiter mode; use --max-record-size=unlimited to allow larger records",
+            "record exceeds --max-record-size={} bytes in line/delimiter/grapheme mode; use --max-record-size=unlimited to allow larger records",
             self.limit
         )
     }
@@ -109,19 +109,21 @@ fn skip_until<R: BufRead + ?Sized>(r: &mut R, delim: u8) -> io::Result<usize> {
 /// `w`, straight from the reader's buffer. Kinds are separate types so the
 /// single-byte path never pays for the multi-byte straddle machinery.
 pub(crate) trait Split {
+    /// Returns `Ok(0)` only at true end of stream: a stateful kind must first
+    /// drain any bytes it consumed ahead of the current element.
     fn read_to<R: BufRead + ?Sized, W: Write + ?Sized>(
-        &self,
+        &mut self,
         r: &mut R,
         w: &mut W,
     ) -> io::Result<usize>;
-    fn skip<R: BufRead + ?Sized>(&self, r: &mut R) -> io::Result<usize>;
+    fn skip<R: BufRead + ?Sized>(&mut self, r: &mut R) -> io::Result<usize>;
 
     /// Skip up to `n` chunks, returning how many were skipped; fewer than `n`
     /// means end of stream, with a terminal delimiter-less fragment counting
     /// as one chunk. Equivalent to `n` `skip` calls; kinds with a cheaper bulk
     /// scan override it.
     #[inline]
-    fn skip_n<R: BufRead + ?Sized>(&self, r: &mut R, n: usize) -> io::Result<usize> {
+    fn skip_n<R: BufRead + ?Sized>(&mut self, r: &mut R, n: usize) -> io::Result<usize> {
         for skipped in 0..n {
             if self.skip(r)? == 0 {
                 return Ok(skipped);
@@ -129,6 +131,17 @@ pub(crate) trait Split {
         }
         Ok(n)
     }
+
+    /// Emit the rest of the stream verbatim. Chunking no longer matters once
+    /// nothing more is skipped — but this must flow through the split, not a
+    /// bare `io::copy`, because a stateful kind may hold bytes consumed ahead
+    /// of the reader that `io::copy` would silently drop. Deliberately no
+    /// default: every kind must state how its read-ahead (if any) drains.
+    fn copy_rest<R: BufRead + ?Sized, W: Write + ?Sized>(
+        &mut self,
+        r: &mut R,
+        w: &mut W,
+    ) -> io::Result<u64>;
 }
 
 /// Single-byte delimiter. Lines are `Byte(b'\n')`, `-z` is `Byte(0)`.
@@ -159,21 +172,21 @@ impl<'d> Bytes<'d> {
 impl Split for Byte {
     #[inline]
     fn read_to<R: BufRead + ?Sized, W: Write + ?Sized>(
-        &self,
+        &mut self,
         r: &mut R,
         w: &mut W,
     ) -> io::Result<usize> {
         scan_until(r, self.0, |chunk| w.write_all(chunk))
     }
     #[inline]
-    fn skip<R: BufRead + ?Sized>(&self, r: &mut R) -> io::Result<usize> {
+    fn skip<R: BufRead + ?Sized>(&mut self, r: &mut R) -> io::Result<usize> {
         skip_until(r, self.0)
     }
 
     /// Counts delimiters per `fill_buf` block instead of re-entering the
     /// scanner once per chunk, so skipping millions of short chunks costs one
     /// `memchr_iter` pass per block.
-    fn skip_n<R: BufRead + ?Sized>(&self, r: &mut R, n: usize) -> io::Result<usize> {
+    fn skip_n<R: BufRead + ?Sized>(&mut self, r: &mut R, n: usize) -> io::Result<usize> {
         // Not just a fast path: the loop stops on `skipped + found == n`, which
         // n = 0 can never satisfy once a delimiter is counted.
         if n == 0 {
@@ -214,12 +227,22 @@ impl Split for Byte {
             }
         }
     }
+
+    /// Stateless: nothing is read ahead, the reader is the whole remainder.
+    #[inline]
+    fn copy_rest<R: BufRead + ?Sized, W: Write + ?Sized>(
+        &mut self,
+        r: &mut R,
+        w: &mut W,
+    ) -> io::Result<u64> {
+        io::copy(r, w)
+    }
 }
 
 impl Split for Bytes<'_> {
     #[inline]
     fn read_to<R: BufRead + ?Sized, W: Write + ?Sized>(
-        &self,
+        &mut self,
         r: &mut R,
         w: &mut W,
     ) -> io::Result<usize> {
@@ -227,8 +250,19 @@ impl Split for Bytes<'_> {
     }
 
     #[inline]
-    fn skip<R: BufRead + ?Sized>(&self, r: &mut R) -> io::Result<usize> {
+    fn skip<R: BufRead + ?Sized>(&mut self, r: &mut R) -> io::Result<usize> {
         scan_until_delim(r, self.delimiter, &self.finder, |_| Ok(()))
+    }
+
+    /// Stateless: the carry in `scan_until_delim` lives within one chunk, so
+    /// nothing is read ahead and the reader is the whole remainder.
+    #[inline]
+    fn copy_rest<R: BufRead + ?Sized, W: Write + ?Sized>(
+        &mut self,
+        r: &mut R,
+        w: &mut W,
+    ) -> io::Result<u64> {
+        io::copy(r, w)
     }
 }
 
@@ -314,7 +348,7 @@ fn extend_carry(carry: &mut Vec<u8>, block: &[u8], keep: usize) {
 /// IteratorExt::slice's take(end).skip(start) ordering, so start >= end yields
 /// an empty window.
 pub(crate) fn slice_window<S: Split, R: BufRead, W: Write>(
-    split: S,
+    mut split: S,
     mut input: R,
     mut output: W,
     start: usize,
@@ -325,7 +359,7 @@ pub(crate) fn slice_window<S: Split, R: BufRead, W: Write>(
     }
     match end {
         None => {
-            io::copy(&mut input, &mut output)?;
+            split.copy_rest(&mut input, &mut output)?;
         }
         Some(end) => {
             let count = end.saturating_sub(start);
@@ -347,7 +381,7 @@ pub(crate) fn slice_window<S: Split, R: BufRead, W: Write>(
 /// without copying. Stops at end of stream or after the last selected index,
 /// so a bounded `end` never reads past its final selected chunk.
 pub(crate) fn slice_stepped<S: Split, R: BufRead, W: Write>(
-    split: S,
+    mut split: S,
     mut input: R,
     mut output: W,
     start: usize,
@@ -388,7 +422,7 @@ pub(crate) fn slice_tail<S: Split, R: BufRead, W: Write>(
 }
 
 pub(crate) fn slice_tail_with_record_limit<S: Split, R: BufRead, W: Write>(
-    split: S,
+    mut split: S,
     mut input: R,
     mut output: W,
     back: NonZeroUsize,
@@ -441,7 +475,7 @@ pub(crate) fn slice_tail_with_record_limit<S: Split, R: BufRead, W: Write>(
 /// fail during the read — after at most `max_record_size` buffered bytes of
 /// it — not after the input was swallowed whole.
 pub(crate) fn read_all_with_record_limit<S: Split, R: BufRead>(
-    split: S,
+    mut split: S,
     mut input: R,
     max_record_size: Option<usize>,
 ) -> io::Result<Vec<u8>> {
@@ -473,7 +507,7 @@ pub(crate) fn slice_lag<S: Split, R: BufRead, W: Write>(
 }
 
 pub(crate) fn slice_lag_with_record_limit<S: Split, R: BufRead, W: Write>(
-    split: S,
+    mut split: S,
     mut input: R,
     mut output: W,
     start: usize,
@@ -576,7 +610,7 @@ mod tests {
         chunks_at(split, input, 8 * 1024)
     }
 
-    fn chunks_at<S: Split>(split: S, input: &[u8], capacity: usize) -> Vec<Vec<u8>> {
+    fn chunks_at<S: Split>(mut split: S, input: &[u8], capacity: usize) -> Vec<Vec<u8>> {
         let mut input = BufReader::with_capacity(capacity, input);
         let mut chunks = Vec::new();
         loop {
@@ -782,18 +816,25 @@ mod tests {
     struct ByteRef(u8);
     impl Split for ByteRef {
         fn read_to<R: BufRead + ?Sized, W: Write + ?Sized>(
-            &self,
+            &mut self,
             r: &mut R,
             w: &mut W,
         ) -> io::Result<usize> {
             Byte(self.0).read_to(r, w)
         }
-        fn skip<R: BufRead + ?Sized>(&self, r: &mut R) -> io::Result<usize> {
+        fn skip<R: BufRead + ?Sized>(&mut self, r: &mut R) -> io::Result<usize> {
             Byte(self.0).skip(r)
         }
         // Forwarded so the parity harnesses exercise Byte's bulk override.
-        fn skip_n<R: BufRead + ?Sized>(&self, r: &mut R, n: usize) -> io::Result<usize> {
+        fn skip_n<R: BufRead + ?Sized>(&mut self, r: &mut R, n: usize) -> io::Result<usize> {
             Byte(self.0).skip_n(r, n)
+        }
+        fn copy_rest<R: BufRead + ?Sized, W: Write + ?Sized>(
+            &mut self,
+            r: &mut R,
+            w: &mut W,
+        ) -> io::Result<u64> {
+            Byte(self.0).copy_rest(r, w)
         }
     }
 
@@ -801,21 +842,28 @@ mod tests {
     struct BytesRef<'d>(&'d [u8]);
     impl Split for BytesRef<'_> {
         fn read_to<R: BufRead + ?Sized, W: Write + ?Sized>(
-            &self,
+            &mut self,
             r: &mut R,
             w: &mut W,
         ) -> io::Result<usize> {
             Bytes::new(self.0).read_to(r, w)
         }
-        fn skip<R: BufRead + ?Sized>(&self, r: &mut R) -> io::Result<usize> {
+        fn skip<R: BufRead + ?Sized>(&mut self, r: &mut R) -> io::Result<usize> {
             Bytes::new(self.0).skip(r)
+        }
+        fn copy_rest<R: BufRead + ?Sized, W: Write + ?Sized>(
+            &mut self,
+            r: &mut R,
+            w: &mut W,
+        ) -> io::Result<u64> {
+            Bytes::new(self.0).copy_rest(r, w)
         }
     }
 
     // skip_n must match `n` one-by-one skips exactly: same chunk count and
     // same remaining stream. Small capacities force the delimiter to land as
     // the last byte of a block and fragments to span blocks.
-    fn assert_skip_n_matches_skip<S: Split>(split: S, input: &[u8]) {
+    fn assert_skip_n_matches_skip<S: Split>(mut split: S, input: &[u8]) {
         use std::io::Read;
         for n in 0..=6 {
             for capacity in [1, 2, 3, 8 * 1024] {
@@ -1073,7 +1121,7 @@ mod tests {
 
     // read_to's return contract: every chunk reports its full byte length, and
     // Ok(0) appears only at end of stream — where it stays Ok(0).
-    fn assert_read_to_eof_contract<S: Split>(split: S, input: &[u8]) {
+    fn assert_read_to_eof_contract<S: Split>(mut split: S, input: &[u8]) {
         let mut r = BufReader::with_capacity(2, input);
         let mut consumed = 0;
         loop {
@@ -1098,6 +1146,17 @@ mod tests {
         }
         for input in [&b""[..], b"a||b||c||", b"a||b||c", b"abc", b"|"] {
             assert_read_to_eof_contract(Bytes::new(b"||"), input);
+        }
+        // The stateful grapheme kind must uphold the same contract, including
+        // with a truncated sequence or straddle-prone bytes at the end.
+        for input in [
+            &b""[..],
+            b"abc",
+            "e\u{301}👨‍👩‍👧".as_bytes(),
+            &[0xF0, 0x90],
+            &[0xFF, 0x80, 0xE3],
+        ] {
+            assert_read_to_eof_contract(crate::ext::Graphemes::new(), input);
         }
     }
 

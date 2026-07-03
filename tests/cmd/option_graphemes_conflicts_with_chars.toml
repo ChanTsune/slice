@@ -1,0 +1,3 @@
+bin.name = "slice"
+args = ["--graphemes", "--chars", "1:"]
+status.code = 2

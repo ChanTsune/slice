@@ -8,7 +8,7 @@ use crate::{
     ext::{
         char_lag, char_stepped, char_tail, char_window, read_all_with_record_limit, slice_lag,
         slice_lag_with_record_limit, slice_stepped, slice_tail, slice_tail_with_record_limit,
-        slice_window, Byte, Bytes, Utf8Elements,
+        slice_window, Byte, Bytes, GraphemeElements, Graphemes, Utf8Elements,
     },
     range::{DeferredPlan, Plan, ReversePlan, SliceIndex, SlicePlan, SliceRange},
 };
@@ -29,22 +29,31 @@ enum SliceMode<'b> {
     /// UTF-8 characters (Unicode scalar values); a byte that starts no valid
     /// sequence is one element of its own, so any input splits losslessly.
     Chars,
+    /// User-perceived characters (UAX #29 extended grapheme clusters);
+    /// invalid bytes stand alone and terminate the cluster, so any input
+    /// splits losslessly here too.
+    Graphemes,
     /// Non-empty by construction: `slice_mode` folds the empty delimiter into
     /// `Bytes`, so the delimiter drivers never see an empty shape.
     Custom(&'b [u8]),
 }
 
-/// Classify the slicing mode from the resolved flags. An empty `--delimiter`
-/// splits one byte per chunk — identical to byte mode under every plan — so it
-/// is normalized to `Bytes` here, reaching the seek/copy byte fast paths.
-/// `bytes`/`chars`/`delimiter` are mutually exclusive (clap's ArgGroup).
+/// Classify the slicing mode from the parsed flags and the resolved
+/// delimiter (escape-processed, so it is a parameter rather than a field
+/// read). An empty `--delimiter` splits one byte per chunk — identical to
+/// byte mode under every plan — so it is normalized to `Bytes` here, reaching
+/// the seek/copy byte fast paths. The mode flags are mutually exclusive
+/// (clap's ArgGroup).
 #[inline]
-fn slice_mode(bytes: bool, chars: bool, delimiter: Option<&[u8]>) -> SliceMode<'_> {
-    if bytes {
+fn slice_mode<'b>(args: &cli::Args, delimiter: Option<&'b [u8]>) -> SliceMode<'b> {
+    if args.bytes {
         return SliceMode::Bytes;
     }
-    if chars {
+    if args.chars {
         return SliceMode::Chars;
+    }
+    if args.graphemes {
+        return SliceMode::Graphemes;
     }
     match delimiter {
         Some([]) => SliceMode::Bytes,
@@ -63,6 +72,7 @@ impl From<&SliceMode<'_>> for range::TranslateMode {
             SliceMode::Lines => range::TranslateMode::Lines,
             SliceMode::Bytes => range::TranslateMode::Bytes,
             SliceMode::Chars => range::TranslateMode::Chars,
+            SliceMode::Graphemes => range::TranslateMode::Graphemes,
             SliceMode::Custom(_) => range::TranslateMode::Custom,
         }
     }
@@ -290,12 +300,16 @@ where
             SliceMode::Lines => slice_window(Byte(b'\n'), input, output, start, end),
             SliceMode::Bytes => byte_window(input, output, start, end, skip),
             SliceMode::Chars => char_window(input, output, start, end),
+            SliceMode::Graphemes => slice_window(Graphemes::new(), input, output, start, end),
             SliceMode::Custom(delimiter) => delimit_window(input, output, delimiter, start, end),
         },
         SlicePlan::Stepped { start, end, step } => match mode {
             SliceMode::Lines => slice_stepped(Byte(b'\n'), input, output, start, end, step),
             SliceMode::Bytes => byte_mode(input, output, start, end, step),
             SliceMode::Chars => char_stepped(input, output, start, end, step),
+            SliceMode::Graphemes => {
+                slice_stepped(Graphemes::new(), input, output, start, end, step)
+            }
             SliceMode::Custom(delimiter) => {
                 delimit_stepped(input, output, delimiter, start, end, step)
             }
@@ -582,6 +596,17 @@ fn apply_deferred<R: BufRead, W: Write>(
             // An element is at most 4 bytes, so the record limit is meaningless
             // here, like byte mode.
             SliceMode::Chars => char_tail(input, output, back, end, step),
+            // A cluster is unbounded, so the record limit applies like lines.
+            SliceMode::Graphemes if max_record_size.is_some() => slice_tail_with_record_limit(
+                Graphemes::new(),
+                input,
+                output,
+                back,
+                end,
+                step,
+                max_record_size,
+            ),
+            SliceMode::Graphemes => slice_tail(Graphemes::new(), input, output, back, end, step),
             SliceMode::Custom(delimiter) => {
                 delimit_tail(input, output, delimiter, back, end, step, max_record_size)
             }
@@ -599,6 +624,16 @@ fn apply_deferred<R: BufRead, W: Write>(
             SliceMode::Lines => slice_lag(Byte(b'\n'), input, output, start, back, step),
             SliceMode::Bytes => byte_lag(input, output, start, back, step),
             SliceMode::Chars => char_lag(input, output, start, back, step),
+            SliceMode::Graphemes if max_record_size.is_some() => slice_lag_with_record_limit(
+                Graphemes::new(),
+                input,
+                output,
+                start,
+                back,
+                step,
+                max_record_size,
+            ),
+            SliceMode::Graphemes => slice_lag(Graphemes::new(), input, output, start, back, step),
             SliceMode::Custom(delimiter) => {
                 delimit_lag(input, output, delimiter, start, back, step, max_record_size)
             }
@@ -618,11 +653,14 @@ fn apply_reverse<R: BufRead, W: Write>(
     plan: ReversePlan,
     max_record_size: Option<usize>,
 ) -> io::Result<()> {
-    // The record limit is a line/delimiter concept: byte and char modes
-    // ignore it, like their tail-relative paths.
+    // The record limit is a line/delimiter/grapheme concept: byte and char
+    // modes ignore it, like their tail-relative paths.
     let data = match (mode, max_record_size) {
         (SliceMode::Lines, Some(_)) => {
             read_all_with_record_limit(Byte(b'\n'), input, max_record_size)?
+        }
+        (SliceMode::Graphemes, Some(_)) => {
+            read_all_with_record_limit(Graphemes::new(), input, max_record_size)?
         }
         (SliceMode::Custom(&[b]), Some(_)) => {
             read_all_with_record_limit(Byte(b), input, max_record_size)?
@@ -639,18 +677,27 @@ fn apply_reverse<R: BufRead, W: Write>(
     match mode {
         SliceMode::Bytes => reverse_bytes(&data, &mut output, plan)?,
         SliceMode::Lines => reverse_chunks(&data, &mut output, b"\n", plan)?,
-        SliceMode::Chars => reverse_chars(&data, &mut output, plan)?,
+        SliceMode::Chars => reverse_spans(&data, &mut output, plan, Utf8Elements::new(&data))?,
+        SliceMode::Graphemes => {
+            reverse_spans(&data, &mut output, plan, GraphemeElements::new(&data))?
+        }
         SliceMode::Custom(delimiter) => reverse_chunks(&data, &mut output, delimiter, plan)?,
     }
     output.flush()
 }
 
-/// Chars carry no delimiter to re-attach, so emission is a plain descending
-/// walk over the element spans.
-fn reverse_chars<W: Write>(data: &[u8], output: &mut W, plan: ReversePlan) -> io::Result<()> {
+/// Chars and graphemes carry no delimiter to re-attach, so emission is a
+/// plain descending walk over the element spans; `elements` must partition
+/// `data` contiguously (both element iterators do).
+fn reverse_spans<'a, W: Write>(
+    data: &'a [u8],
+    output: &mut W,
+    plan: ReversePlan,
+    elements: impl Iterator<Item = &'a [u8]>,
+) -> io::Result<()> {
     let mut starts = Vec::new();
     let mut pos = 0;
-    for element in Utf8Elements::new(data) {
+    for element in elements {
         starts.push(pos);
         pos += element.len();
     }
@@ -795,20 +842,21 @@ fn entry(args: cli::Args) -> bool {
             .error(clap::error::ErrorKind::ValueValidation, e)
             .exit(),
     };
+    // One classification feeds --explain, --translate, and the slicing
+    // dispatch, so the empty delimiter (folded to Bytes by slice_mode) is
+    // treated identically by all three — never a "part"/Custom on one path and
+    // a byte on another.
+    let mode = slice_mode(&args, delimiter.as_deref());
     let Some(range) = args.range else {
         // clap only waives the required <RANGE> when the exclusive
         // --generate is present, and that case returned above.
         unreachable!("<RANGE> is required when --generate is absent");
     };
-    // One classification feeds --explain, --translate, and the slicing
-    // dispatch, so the empty delimiter (folded to Bytes by slice_mode) is
-    // treated identically by all three — never a "part"/Custom on one path and
-    // a byte on another.
-    let mode = slice_mode(args.bytes, args.chars, delimiter.as_deref());
     if args.explain {
         let unit = match mode {
             SliceMode::Bytes => "byte",
             SliceMode::Chars => "character",
+            SliceMode::Graphemes => "grapheme",
             SliceMode::Custom(_) => "part",
             SliceMode::Lines => "line",
         };
@@ -879,6 +927,17 @@ mod tests {
     use crate::range::Step;
     use std::str::FromStr;
 
+    // Classification inputs come through clap so the tests exercise the real
+    // flag wiring instead of hand-built flag combinations.
+    fn mode_args(flags: &[&str]) -> cli::Args {
+        cli::Args::parse_from(
+            ["slice"]
+                .into_iter()
+                .chain(flags.iter().copied())
+                .chain([":"]),
+        )
+    }
+
     // The driver helpers below take absolute offsets; tail-relative bounds
     // have their own deferred drivers and never reach them.
     fn bounds(range: &SliceRange) -> (usize, Option<usize>) {
@@ -920,23 +979,27 @@ mod tests {
         #[test]
         fn mirrors_slice_mode_including_empty_delimiter() {
             assert_eq!(
-                TranslateMode::from(&slice_mode(true, false, None)),
+                TranslateMode::from(&slice_mode(&mode_args(&["-b"]), None)),
                 TranslateMode::Bytes
             );
             assert_eq!(
-                TranslateMode::from(&slice_mode(false, false, None)),
+                TranslateMode::from(&slice_mode(&mode_args(&[]), None)),
                 TranslateMode::Lines
             );
             assert_eq!(
-                TranslateMode::from(&slice_mode(false, true, None)),
+                TranslateMode::from(&slice_mode(&mode_args(&["--chars"]), None)),
                 TranslateMode::Chars
             );
             assert_eq!(
-                TranslateMode::from(&slice_mode(false, false, Some(&b","[..]))),
+                TranslateMode::from(&slice_mode(&mode_args(&["--graphemes"]), None)),
+                TranslateMode::Graphemes
+            );
+            assert_eq!(
+                TranslateMode::from(&slice_mode(&mode_args(&[]), Some(&b","[..]))),
                 TranslateMode::Custom
             );
             assert_eq!(
-                TranslateMode::from(&slice_mode(false, false, Some(&b""[..]))),
+                TranslateMode::from(&slice_mode(&mode_args(&[]), Some(&b""[..]))),
                 TranslateMode::Bytes
             );
         }
@@ -1473,6 +1536,95 @@ mod tests {
             let mut out = Vec::new();
             char_window(reader, &mut out, 1, None).expect("");
             assert_eq!(out, [0x90, 0x41, 0x42]);
+        }
+    }
+
+    mod graphemes {
+        use super::*;
+
+        // Drive the same entry-level dispatch a real run takes, so every plan
+        // kind is exercised against the graphemes mode; small capacities
+        // straddle multi-byte scalars and cluster joins across fill_buf
+        // boundaries.
+        fn sliced(input: &[u8], range: &str) -> Vec<u8> {
+            let range = SliceRange::from_str(range).unwrap();
+            let mut outputs = [1, 2, 3, 8192].into_iter().map(|capacity| {
+                let reader = io::BufReader::with_capacity(capacity, input);
+                let mut out = Vec::new();
+                match range.plan() {
+                    Plan::Resolved(plan) => {
+                        apply(&SliceMode::Graphemes, reader, &mut out, plan, discard)
+                    }
+                    Plan::Deferred(deferred) => {
+                        apply_deferred(&SliceMode::Graphemes, reader, &mut out, deferred, None)
+                    }
+                    Plan::Reverse(reverse) => {
+                        apply_reverse(&SliceMode::Graphemes, reader, &mut out, reverse, None)
+                    }
+                }
+                .expect("");
+                out
+            });
+            let first = outputs.next().unwrap();
+            assert!(
+                outputs.all(|out| out == first),
+                "every capacity must produce the same slice"
+            );
+            first
+        }
+
+        // a | 👨‍👩‍👧 (ZWJ family) | b | 🇯🇵 (flag) | c — five elements.
+        const INPUT: &[u8] = "a👨‍👩‍👧b🇯🇵c".as_bytes();
+
+        #[test]
+        fn window() {
+            assert_eq!(sliced(INPUT, "1:3"), "👨‍👩‍👧b".as_bytes());
+        }
+
+        #[test]
+        fn unbounded_window() {
+            assert_eq!(sliced(INPUT, "2:"), "b🇯🇵c".as_bytes());
+        }
+
+        #[test]
+        fn stepped() {
+            assert_eq!(sliced(INPUT, "::2"), "abc".as_bytes());
+        }
+
+        #[test]
+        fn tail() {
+            assert_eq!(sliced(INPUT, "-2:"), "🇯🇵c".as_bytes());
+        }
+
+        #[test]
+        fn lag() {
+            assert_eq!(sliced(INPUT, ":-2"), "a👨‍👩‍👧b".as_bytes());
+        }
+
+        #[test]
+        fn reverse() {
+            assert_eq!(sliced(INPUT, "::-1"), "c🇯🇵b👨‍👩‍👧a".as_bytes());
+        }
+
+        #[test]
+        fn combining_mark_stays_with_its_base() {
+            assert_eq!(sliced("e\u{301}x".as_bytes(), "0:1"), "e\u{301}".as_bytes());
+        }
+
+        #[test]
+        fn crlf_is_one_element() {
+            assert_eq!(sliced(b"a\r\nb", "-2:"), b"\r\nb");
+        }
+
+        #[test]
+        fn copy_round_trips_and_invalid_bytes_stand_alone() {
+            // e | FF | ◌́ — the invalid byte splits the would-be cluster.
+            let mut input = b"e".to_vec();
+            input.push(0xFF);
+            input.extend_from_slice("\u{301}".as_bytes());
+            assert_eq!(sliced(&input, "::"), input);
+            assert_eq!(sliced(&input, "1:2"), [0xFF]);
+            assert_eq!(sliced(&input, "0:1"), b"e");
         }
     }
 
@@ -2292,8 +2444,8 @@ mod tests {
                     out
                 };
                 assert_eq!(
-                    apply_with(&slice_mode(false, false, Some(b""))),
-                    apply_with(&slice_mode(true, false, None)),
+                    apply_with(&slice_mode(&mode_args(&[]), Some(b""))),
+                    apply_with(&slice_mode(&mode_args(&["-b"]), None)),
                     "empty delimiter diverged from byte mode for {range}"
                 );
             }
@@ -2301,15 +2453,28 @@ mod tests {
 
         #[test]
         fn classification() {
-            assert!(matches!(slice_mode(false, false, None), SliceMode::Lines));
-            assert!(matches!(slice_mode(true, false, None), SliceMode::Bytes));
-            assert!(matches!(slice_mode(false, true, None), SliceMode::Chars));
             assert!(matches!(
-                slice_mode(false, false, Some(b"")),
+                slice_mode(&mode_args(&[]), None),
+                SliceMode::Lines
+            ));
+            assert!(matches!(
+                slice_mode(&mode_args(&["-b"]), None),
                 SliceMode::Bytes
             ));
             assert!(matches!(
-                slice_mode(false, false, Some(b",")),
+                slice_mode(&mode_args(&["--chars"]), None),
+                SliceMode::Chars
+            ));
+            assert!(matches!(
+                slice_mode(&mode_args(&["--graphemes"]), None),
+                SliceMode::Graphemes
+            ));
+            assert!(matches!(
+                slice_mode(&mode_args(&[]), Some(b"")),
+                SliceMode::Bytes
+            ));
+            assert!(matches!(
+                slice_mode(&mode_args(&[]), Some(b",")),
                 SliceMode::Custom(b",")
             ));
         }

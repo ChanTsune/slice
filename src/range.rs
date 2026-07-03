@@ -66,6 +66,7 @@ pub(crate) enum TranslateMode {
     Lines,
     Bytes,
     Chars,
+    Graphemes,
     Custom,
 }
 
@@ -746,6 +747,7 @@ type Translation = (String, Option<&'static str>);
 const CUSTOM_REASON: &str = "no standard tool selects records by a custom delimiter";
 const CHARS_REASON: &str =
     "cut -c is per-line (and selects bytes on GNU), not a stream character slice";
+const GRAPHEMES_REASON: &str = "no standard tool selects by grapheme cluster";
 const STEP_BYTE_REASON: &str = "strided byte selection has no standard-tool equivalent";
 const AWK_BYTE_REASON: &str = "awk operates on lines, not byte offsets";
 const AWK_NEWLINE_NOTE: &str =
@@ -816,6 +818,7 @@ fn empty_candidate(mode: TranslateMode, dialect: Dialect) -> Result<Translation,
     match mode {
         TranslateMode::Custom => Err(CUSTOM_REASON),
         TranslateMode::Chars => Err(CHARS_REASON),
+        TranslateMode::Graphemes => Err(GRAPHEMES_REASON),
         TranslateMode::Lines => match dialect {
             Dialect::Gnu => Ok(("head -n 0".to_owned(), None)),
             _ => Err(EMPTY_RANGE_LINES_REASON),
@@ -852,6 +855,7 @@ fn translate_unbounded(
     match mode {
         TranslateMode::Custom => return Err(CUSTOM_REASON),
         TranslateMode::Chars => return Err(CHARS_REASON),
+        TranslateMode::Graphemes => return Err(GRAPHEMES_REASON),
         TranslateMode::Bytes if step > 1 => return Err(STEP_BYTE_REASON),
         _ => {}
     }
@@ -869,7 +873,9 @@ fn translate_unbounded(
                 Dialect::Awk => Err(AWK_BYTE_REASON),
                 _ => Ok((format!("tail -c +{first}"), None)),
             },
-            TranslateMode::Chars | TranslateMode::Custom => unreachable!(),
+            TranslateMode::Chars | TranslateMode::Graphemes | TranslateMode::Custom => {
+                unreachable!()
+            }
         }
     } else {
         // Unbounded stepped: lines only (byte and custom errored above).
@@ -895,6 +901,9 @@ fn translate_bounded(
     }
     if mode == TranslateMode::Chars {
         return Err(CHARS_REASON);
+    }
+    if mode == TranslateMode::Graphemes {
+        return Err(GRAPHEMES_REASON);
     }
     // A byte step matters only if a second selected byte falls within
     // [start, end); when it does not (`end - start <= step`), the range picks
@@ -942,7 +951,7 @@ fn translate_bounded(
                 )),
             }
         }
-        TranslateMode::Chars | TranslateMode::Custom => unreachable!(),
+        TranslateMode::Chars | TranslateMode::Graphemes | TranslateMode::Custom => unreachable!(),
     }
 }
 
@@ -960,6 +969,9 @@ fn translate_lag(
     }
     if mode == TranslateMode::Chars {
         return Err(CHARS_REASON);
+    }
+    if mode == TranslateMode::Graphemes {
+        return Err(GRAPHEMES_REASON);
     }
     if start > 0 {
         return Err(LAG_START_REASON);
@@ -981,7 +993,7 @@ fn translate_lag(
             Dialect::Gnu => Ok((format!("head -c -{back}"), None)),
             _ => Err(DROP_LAST_BYTES_REASON),
         },
-        TranslateMode::Chars | TranslateMode::Custom => unreachable!(),
+        TranslateMode::Chars | TranslateMode::Graphemes | TranslateMode::Custom => unreachable!(),
     }
 }
 
@@ -1000,6 +1012,7 @@ fn translate_reverse(
     match mode {
         TranslateMode::Custom => return Err(CUSTOM_REASON),
         TranslateMode::Chars => return Err(CHARS_REASON),
+        TranslateMode::Graphemes => return Err(GRAPHEMES_REASON),
         TranslateMode::Bytes => return Err(REVERSE_BYTES_REASON),
         TranslateMode::Lines => {}
     }
@@ -1034,6 +1047,9 @@ fn translate_tail(
     if mode == TranslateMode::Chars {
         return Err(CHARS_REASON);
     }
+    if mode == TranslateMode::Graphemes {
+        return Err(GRAPHEMES_REASON);
+    }
     if step > 1 {
         return Err(TAIL_STEP_REASON);
     }
@@ -1050,7 +1066,7 @@ fn translate_tail(
             Dialect::Awk => Err(AWK_BYTE_REASON),
             _ => Ok((format!("tail -c {back}"), None)),
         },
-        TranslateMode::Chars | TranslateMode::Custom => unreachable!(),
+        TranslateMode::Chars | TranslateMode::Graphemes | TranslateMode::Custom => unreachable!(),
     }
 }
 
@@ -2038,6 +2054,20 @@ mod tests {
                     tr(range, Chars, Gnu),
                     "# no equivalent: cut -c is per-line (and selects bytes on GNU), \
                      not a stream character slice\n",
+                    "range {range}"
+                );
+            }
+        }
+
+        // Graphemes mirror Chars: cat for Copy, no equivalent otherwise.
+        #[test]
+        fn graphemes_have_no_single_command_equivalent() {
+            use TranslateMode::Graphemes;
+            assert_eq!(tr(":", Graphemes, Posix), "# posix\ncat\n");
+            for range in ["1:5", "5:", "-3:", ":-2", "::2", "::-1", "5:3"] {
+                assert_eq!(
+                    tr(range, Graphemes, Gnu),
+                    "# no equivalent: no standard tool selects by grapheme cluster\n",
                     "range {range}"
                 );
             }
