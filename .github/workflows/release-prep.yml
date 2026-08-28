@@ -30,7 +30,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
 
       - name: Install cargo-release
-        uses: taiki-e/install-action@v2.85.8
+        uses: taiki-e/install-action@v2.86.7
         with:
           tool: cargo-release
 
